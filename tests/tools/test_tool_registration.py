@@ -68,6 +68,14 @@ EXPECTED_TOOLS = {
     "kg_add_relation",
     "kg_query",
     "kg_neighbors",
+    # filip_cockpit.py
+    "filip_route",
+    "codex_adapter",
+    "claude_adapter",
+    "lumo_adapter",
+    "perplexity_adapter",
+    "aria_handoff",
+    "safe_shell",
 }
 
 

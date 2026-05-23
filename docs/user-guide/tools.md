@@ -178,6 +178,22 @@ print(desc)
 
 ## Built-in Tools Summary
 
+### Filip Jarvis Cockpit
+
+The cockpit tools bridge OpenJarvis to local developer agents without storing
+API keys in OpenJarvis config. They are OAuth/CLI-first and rely on existing
+`codex exec`, `claude -p`, `lumo-offload`, `pwm ask`, and `aria-handoff`
+sessions instead of requiring `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or Ollama
+for cockpit startup:
+
+- `filip_route` chooses Codex, Claude, Lumo, Perplexity, `.aria`, or safe shell.
+- `codex_adapter` delegates implementation work to `codex exec`.
+- `claude_adapter` asks `claude -p` for advisory review.
+- `lumo_adapter` calls `lumo-offload` for bounded microtasks.
+- `perplexity_adapter` calls `pwm ask` for current research with citations.
+- `aria_handoff` reads and updates compact `.aria` continuity state.
+- `safe_shell` runs only a small read-only command allowlist.
+
 All built-in tools are registered via `@ToolRegistry.register()` and are available by name to agents and the CLI.
 
 | Category | Registry Key | Description |

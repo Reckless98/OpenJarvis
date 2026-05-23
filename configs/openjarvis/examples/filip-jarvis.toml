@@ -1,0 +1,73 @@
+# Filip Jarvis Cockpit — text-first local command router
+# Copy to ~/.openjarvis/config.toml only after reviewing local paths.
+#
+# This cockpit is OAuth/CLI-first. It does not require OPENAI_API_KEY or
+# ANTHROPIC_API_KEY. Codex and Claude use the existing local CLI logins.
+# The engine below is only for normal OpenJarvis model chat; `jarvis cockpit`
+# can route text commands even when Ollama is missing or stopped.
+
+[engine]
+default = "ollama"
+
+[intelligence]
+default_model = "qwen3.5:9b"
+
+[agent]
+default_agent = "orchestrator"
+max_turns = 8
+
+[tools]
+enabled = [
+  "filip_route",
+  "codex_adapter",
+  "claude_adapter",
+  "lumo_adapter",
+  "perplexity_adapter",
+  "aria_handoff",
+  "safe_shell",
+  "think",
+  "calculator",
+]
+
+[filip_jarvis]
+voice_enabled = false
+wake_phrase_text = "Welcome back, Captain."
+default_repo = "/home/zer0/Projects/OpenJarvis"
+aria_fallback_root = "/home/zer0/Projects/filip-dev-arsenal"
+
+[filip_jarvis.commands]
+codex = "codex"
+claude = "claude"
+lumo = "lumo-offload"
+perplexity = "pwm"
+aria = "aria-handoff"
+
+[filip_jarvis.routing]
+coding = "codex"
+review = "claude"
+summary = "lumo"
+research = "perplexity"
+continuity = "aria"
+system = "safe_shell"
+
+[filip_jarvis.safe_shell]
+allow = [
+  "pwd",
+  "ls",
+  "git status",
+  "git status --short",
+  "git status --short --branch",
+  "git diff --stat",
+  "df -h",
+  "free -h",
+  "nvidia-smi",
+  "uptime",
+  "whoami",
+  "uname -a",
+  "ss -tulpn",
+]
+
+[filip_jarvis.voice_next]
+tts = "spd-say or Piper"
+stt = "whisper.cpp or faster-whisper"
+wake = "optional double-clap module after text routing is stable"

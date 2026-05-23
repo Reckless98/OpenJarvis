@@ -181,6 +181,7 @@ nav:
       - Agents: user-guide/agents.md
       - Channels & Connectors: user-guide/channels-and-connectors.md
       - Tools: user-guide/tools.md
+      - Filip Jarvis Cockpit: user-guide/filip-jarvis-cockpit.md
       - Memory: user-guide/memory.md
       - External MCP Servers: user-guide/mcp-external-servers.md
       - Scheduler: user-guide/scheduler.md

@@ -199,6 +199,25 @@ jarvis model pull qwen3:8b
 
 ---
 
+## `jarvis cockpit`
+
+Route a text request through the local Jarvis cockpit without requiring voice or
+a local model loop. Cockpit mode is OAuth/CLI-first: it uses logged-in `codex`,
+`claude`, `lumo-offload`, `pwm`, and `aria-handoff` commands, so missing
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or Ollama does not fail startup.
+
+```bash
+jarvis cockpit "show system status"
+jarvis cockpit --dry-run "ask Claude to review this diff"
+jarvis cockpit --json "search latest docs for this library"
+```
+
+The cockpit routes coding to Codex, review to Claude, summaries to Lumo,
+current research to Perplexity, continuity to `.aria`, and read-only local
+status checks to the safe shell allowlist.
+
+---
+
 ## `jarvis pearl`
 
 Access Pearl's native node, wallet, and RPC tools from the OpenJarvis CLI.
