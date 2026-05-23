@@ -61,6 +61,8 @@ class CockpitRunRequest(BaseModel):
     command: str
     repo_path: str = "~/Projects/OpenJarvis"
     dry_run: bool = True
+    backend: str | None = None
+    model: str | None = None
 
 
 # ---- Agent routes ----
@@ -902,22 +904,42 @@ async def run_cockpit(req: CockpitRunRequest, request: Request):
         from starlette.concurrency import run_in_threadpool
 
         from openjarvis.tools.filip_cockpit import (
+            RouteDecision,
+            backend_status,
             detect_tools,
             execute_route,
             route_text,
         )
 
-        decision = route_text(command)
+        backend_override = (req.backend or "").strip() or None
+        model = (req.model or "").strip() or None
+        if backend_override and backend_override not in backend_status():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown backend override: {backend_override}",
+            )
+
+        if backend_override:
+            decision = RouteDecision(
+                backend=backend_override,
+                reason=f"manual override: {backend_override}",
+                action="override",
+            )
+        else:
+            decision = route_text(command)
         result = await run_in_threadpool(
             execute_route,
             command,
             req.repo_path,
             req.dry_run,
+            backend_override=backend_override,
+            model=model,
         )
         return {
             "backend": decision.backend,
             "reason": decision.reason,
             "action": decision.action,
+            "model": model or "",
             "success": result.success,
             "result": result.content,
             "available": detect_tools(),
@@ -927,6 +949,14 @@ async def run_cockpit(req: CockpitRunRequest, request: Request):
     except Exception as exc:
         logger.exception("Cockpit command failed")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@cockpit_router.get("/backends")
+async def list_cockpit_backends():
+    """List CLI-bridge backends and curated models for the cockpit UI."""
+    from openjarvis.tools.filip_cockpit import backend_status
+
+    return {"backends": backend_status()}
 
 
 def include_all_routes(app) -> None:

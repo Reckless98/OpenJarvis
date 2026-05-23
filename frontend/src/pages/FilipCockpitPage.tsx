@@ -1,16 +1,28 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  Ear,
+  Mic,
+  MicOff,
   Play,
   RefreshCw,
   ShieldCheck,
   Sparkles,
   SquareTerminal,
+  Volume2,
+  VolumeX,
   XCircle,
 } from 'lucide-react';
-import { runCockpit } from '../lib/api';
-import type { CockpitRunResponse } from '../lib/api';
+import { fetchCockpitBackends, runCockpit } from '../lib/api';
+import type { CockpitBackendInfo, CockpitRunResponse } from '../lib/api';
+import {
+  loadCockpitPrefs,
+  saveCockpitPrefs,
+  type CockpitPrefs,
+} from '../lib/cockpitPrefs';
+import { useClapDetector } from '../lib/useClapDetector';
+import { useVoice } from '../lib/useVoice';
 
 const QUICK_ACTIONS = [
   { label: 'Hello', command: 'hello' },
@@ -42,6 +54,44 @@ function missingTools(result: CockpitRunResponse | null): string[] {
     .map(([, label]) => label);
 }
 
+/**
+ * Try playing /wake.mp3 if the user provided one; otherwise synthesize a short
+ * three-note chord with OscillatorNodes so the experience works out of the box.
+ */
+async function playWakeSound() {
+  try {
+    const audio = new Audio('/wake.mp3');
+    audio.volume = 0.85;
+    await audio.play();
+    return;
+  } catch {
+    /* fall through to synthesized fallback */
+  }
+  try {
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new Ctx();
+    const now = ctx.currentTime;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.exponentialRampToValueAtTime(0.25, now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+    gain.connect(ctx.destination);
+    [392, 523.25, 659.25].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + i * 0.05);
+      osc.connect(gain);
+      osc.start(now + i * 0.05);
+      osc.stop(now + 1.0);
+    });
+    setTimeout(() => ctx.close().catch(() => {}), 1200);
+  } catch {
+    /* nothing else to do */
+  }
+}
+
 export function FilipCockpitPage() {
   const [command, setCommand] = useState('hello');
   const [repoPath, setRepoPath] = useState('~/Projects/OpenJarvis');
@@ -49,28 +99,119 @@ export function FilipCockpitPage() {
   const [result, setResult] = useState<CockpitRunResponse | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [prefs, setPrefs] = useState<CockpitPrefs>(() => loadCockpitPrefs());
+  const [backends, setBackends] = useState<Record<string, CockpitBackendInfo> | null>(null);
+  const [backendOverride, setBackendOverride] = useState<string>('');
+  const [modelOverride, setModelOverride] = useState<string>('');
+  const [statusLine, setStatusLine] = useState('');
+
+  useEffect(() => {
+    fetchCockpitBackends()
+      .then((res) => setBackends(res.backends))
+      .catch(() => setBackends({}));
+  }, []);
+
+  // Sync override defaults from saved prefs once backends arrive.
+  useEffect(() => {
+    if (!backends || backendOverride) return;
+    const candidate = prefs.defaultBackend;
+    if (candidate && backends[candidate]?.available) {
+      setBackendOverride(candidate);
+      setModelOverride(prefs.preferredModel[candidate] ?? '');
+    }
+  }, [backends, backendOverride, prefs]);
+
+  const persist = (next: CockpitPrefs) => {
+    setPrefs(next);
+    saveCockpitPrefs(next);
+  };
 
   const missing = useMemo(() => missingTools(result), [result]);
   const canRun = command.trim().length > 0 && !loading;
 
-  const submit = async () => {
-    if (!canRun) return;
+  const voice = useVoice(prefs.ttsEnabled);
+
+  const submit = async (overrideCommand?: string) => {
+    const next = (overrideCommand ?? command).trim();
+    if (!next || loading) return;
     setLoading(true);
     setError('');
+    setStatusLine(`Routing: ${next}`);
     try {
-      const next = await runCockpit({
-        command,
+      const response = await runCockpit({
+        command: next,
         repo_path: repoPath,
         dry_run: dryRun,
+        backend: backendOverride || null,
+        model: modelOverride || null,
       });
-      setResult(next);
+      setResult(response);
+      setStatusLine(
+        response.success
+          ? `Routed to ${response.backend}${response.model ? ` (${response.model})` : ''}`
+          : `Failed on ${response.backend}`,
+      );
+      if (prefs.ttsEnabled && response.success) {
+        voice.speak(response.result.slice(0, 480));
+      }
     } catch (exc) {
       setResult(null);
-      setError(exc instanceof Error ? exc.message : 'Cockpit request failed');
+      const message = exc instanceof Error ? exc.message : 'Cockpit request failed';
+      setError(message);
+      setStatusLine(`Error: ${message}`);
     } finally {
       setLoading(false);
     }
   };
+
+  const wakeAndListen = async () => {
+    await playWakeSound();
+    setStatusLine('Listening for command…');
+    if (!voice.sttSupported) {
+      setStatusLine(
+        'Wake fired, but SpeechRecognition is unavailable in this browser. Use the mic button or type your command.',
+      );
+      return;
+    }
+    try {
+      const transcript = await voice.listenOnce();
+      if (!transcript) {
+        setStatusLine('Heard nothing — try again.');
+        return;
+      }
+      setCommand(transcript);
+      await submit(transcript);
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : 'STT error';
+      setStatusLine(`STT: ${message}`);
+    }
+  };
+
+  const clap = useClapDetector({
+    enabled: prefs.wakeMode === 'clap',
+    onClap: () => {
+      void wakeAndListen();
+    },
+  });
+
+  const pushToTalk = async () => {
+    if (!voice.sttSupported) {
+      setStatusLine('SpeechRecognition is not supported in this browser.');
+      return;
+    }
+    try {
+      const transcript = await voice.listenOnce();
+      if (transcript) {
+        setCommand(transcript);
+        await submit(transcript);
+      }
+    } catch (exc) {
+      setStatusLine(exc instanceof Error ? `STT: ${exc.message}` : 'STT error');
+    }
+  };
+
+  const backendEntries = useMemo(() => (backends ? Object.entries(backends) : []), [backends]);
+  const modelOptions = backendOverride && backends ? backends[backendOverride]?.models ?? [] : [];
 
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8">
@@ -82,7 +223,7 @@ export function FilipCockpitPage() {
               style={{ color: 'var(--color-accent)' }}
             >
               <Sparkles size={14} />
-              OAuth/CLI-first
+              CLI bridges only — no API keys, no Ollama required
             </div>
             <h1 className="text-xl font-semibold" style={{ color: 'var(--color-text)' }}>
               Filip Cockpit
@@ -91,10 +232,10 @@ export function FilipCockpitPage() {
           <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
             <span className="inline-flex items-center gap-1.5">
               <ShieldCheck size={14} style={{ color: 'var(--color-success)' }} />
-              Voice off
+              {prefs.wakeMode === 'off' ? 'Wake off' : `Wake: ${prefs.wakeMode}`}
             </span>
-            <span>API keys optional</span>
-            <span>Ollama optional</span>
+            <span>{voice.sttSupported ? 'STT ready' : 'STT unsupported'}</span>
+            <span>{prefs.ttsEnabled ? 'TTS on' : 'TTS off'}</span>
           </div>
         </header>
 
@@ -150,7 +291,7 @@ export function FilipCockpitPage() {
             </label>
 
             <button
-              onClick={submit}
+              onClick={() => void submit()}
               disabled={!canRun}
               className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-opacity"
               style={{
@@ -165,22 +306,203 @@ export function FilipCockpitPage() {
           </div>
         </section>
 
-        <section className="flex flex-wrap gap-2">
-          {QUICK_ACTIONS.map((item) => (
-            <button
-              key={item.label}
-              onClick={() => setCommand(item.command)}
-              className="rounded-lg px-3 py-1.5 text-xs transition-colors"
+        <section
+          className="grid gap-3 rounded-lg p-4 md:grid-cols-3"
+          style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)' }}
+        >
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>
+              Backend override
+            </span>
+            <select
+              value={backendOverride}
+              onChange={(event) => {
+                const next = event.target.value;
+                setBackendOverride(next);
+                if (next && backends) {
+                  setModelOverride(prefs.preferredModel[next] ?? '');
+                } else {
+                  setModelOverride('');
+                }
+              }}
+              className="rounded-lg px-3 py-2 text-sm outline-none"
               style={{
-                background: command === item.command ? 'var(--color-accent-subtle)' : 'var(--color-bg-secondary)',
-                border: '1px solid var(--color-border)',
-                color: command === item.command ? 'var(--color-text)' : 'var(--color-text-secondary)',
+                background: 'var(--color-input-bg)',
+                border: '1px solid var(--color-input-border)',
+                color: 'var(--color-text)',
               }}
             >
-              {item.label}
-            </button>
-          ))}
+              <option value="">Smart routing (auto)</option>
+              {backendEntries.map(([key, info]) => (
+                <option key={key} value={key} disabled={!info.available}>
+                  {info.label}
+                  {info.available ? '' : ' (unavailable)'}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>
+              Model
+            </span>
+            <select
+              value={modelOverride}
+              onChange={(event) => setModelOverride(event.target.value)}
+              disabled={!backendOverride || modelOptions.length <= 1}
+              className="rounded-lg px-3 py-2 text-sm outline-none"
+              style={{
+                background: 'var(--color-input-bg)',
+                border: '1px solid var(--color-input-border)',
+                color: 'var(--color-text)',
+              }}
+            >
+              {(modelOptions.length ? modelOptions : ['']).map((model) => (
+                <option key={model} value={model}>
+                  {model === '' ? 'CLI session default' : model}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>
+              Wake
+            </span>
+            <div className="flex items-center gap-1">
+              {(['off', 'clap', 'always'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => persist({ ...prefs, wakeMode: mode })}
+                  className="flex-1 rounded-lg px-2 py-2 text-xs"
+                  style={{
+                    background:
+                      prefs.wakeMode === mode
+                        ? 'var(--color-accent-subtle)'
+                        : 'var(--color-bg-secondary)',
+                    color:
+                      prefs.wakeMode === mode
+                        ? 'var(--color-text)'
+                        : 'var(--color-text-secondary)',
+                    border: '1px solid var(--color-border)',
+                  }}
+                >
+                  {mode === 'off' ? 'Off' : mode === 'clap' ? 'Clap-clap' : 'Always-on'}
+                </button>
+              ))}
+            </div>
+          </div>
         </section>
+
+        <section className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
+            {QUICK_ACTIONS.map((item) => (
+              <button
+                key={item.label}
+                onClick={() => setCommand(item.command)}
+                className="rounded-lg px-3 py-1.5 text-xs transition-colors"
+                style={{
+                  background: command === item.command ? 'var(--color-accent-subtle)' : 'var(--color-bg-secondary)',
+                  border: '1px solid var(--color-border)',
+                  color: command === item.command ? 'var(--color-text)' : 'var(--color-text-secondary)',
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => persist({ ...prefs, ttsEnabled: !prefs.ttsEnabled })}
+              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs"
+              style={{
+                background: prefs.ttsEnabled ? 'var(--color-accent-subtle)' : 'var(--color-bg-secondary)',
+                color: prefs.ttsEnabled ? 'var(--color-text)' : 'var(--color-text-secondary)',
+                border: '1px solid var(--color-border)',
+              }}
+              title={voice.ttsSupported ? 'Read replies aloud' : 'SpeechSynthesis unsupported'}
+              disabled={!voice.ttsSupported}
+            >
+              {prefs.ttsEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
+              {prefs.ttsEnabled ? 'TTS on' : 'TTS off'}
+            </button>
+            <button
+              onClick={() => void pushToTalk()}
+              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs"
+              style={{
+                background: voice.listening
+                  ? 'color-mix(in srgb, var(--color-accent) 24%, transparent)'
+                  : 'var(--color-bg-secondary)',
+                color: 'var(--color-text)',
+                border: '1px solid var(--color-border)',
+              }}
+              title={voice.sttSupported ? 'Push-to-talk' : 'SpeechRecognition unsupported'}
+              disabled={!voice.sttSupported || loading}
+            >
+              {voice.listening ? <Mic size={14} /> : <MicOff size={14} />}
+              {voice.listening ? 'Listening…' : 'Talk'}
+            </button>
+            <button
+              onClick={() => void wakeAndListen()}
+              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs"
+              style={{
+                background: 'var(--color-bg-secondary)',
+                color: 'var(--color-text)',
+                border: '1px solid var(--color-border)',
+              }}
+              title="Trigger wake manually"
+            >
+              <Ear size={14} />
+              Wake
+            </button>
+          </div>
+        </section>
+
+        {prefs.wakeMode === 'clap' && (
+          <section
+            className="flex items-center gap-3 rounded-lg p-3 text-xs"
+            style={{
+              background: 'var(--color-bg-secondary)',
+              border: '1px solid var(--color-border)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            <Mic size={14} style={{ color: clap.ready ? 'var(--color-success)' : 'var(--color-text-tertiary)' }} />
+            <span>
+              {clap.error
+                ? `Mic: ${clap.error}`
+                : clap.ready
+                  ? 'Listening for clap-clap'
+                  : 'Requesting microphone…'}
+            </span>
+            <div
+              className="ml-auto h-1.5 w-32 overflow-hidden rounded"
+              style={{ background: 'var(--color-bg-tertiary)' }}
+            >
+              <div
+                className="h-full rounded"
+                style={{
+                  width: `${Math.min(100, Math.round(clap.level * 200))}%`,
+                  background: 'var(--color-accent)',
+                  transition: 'width 80ms linear',
+                }}
+              />
+            </div>
+          </section>
+        )}
+
+        {statusLine && (
+          <div
+            className="rounded-lg px-3 py-2 text-xs"
+            style={{
+              background: 'var(--color-bg-secondary)',
+              border: '1px solid var(--color-border)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            {statusLine}
+          </div>
+        )}
 
         <section className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
           <div
@@ -207,6 +529,14 @@ export function FilipCockpitPage() {
                   {result?.backend || '—'}
                 </dd>
               </div>
+              {result?.model && (
+                <div>
+                  <dt className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>Model</dt>
+                  <dd className="mt-1" style={{ color: 'var(--color-text-secondary)' }}>
+                    {result.model}
+                  </dd>
+                </div>
+              )}
               <div>
                 <dt className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>Action</dt>
                 <dd className="mt-1" style={{ color: 'var(--color-text-secondary)' }}>

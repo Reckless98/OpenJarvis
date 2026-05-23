@@ -84,6 +84,28 @@ class RouteDecision:
     action: str
 
 
+# Curated model lists exposed to the cockpit Backends page.
+# These route through CLI bridges (claude -p --model X, codex exec --model X);
+# no API keys are required. "" means "let the CLI pick its session default".
+BACKEND_MODELS: dict[str, list[str]] = {
+    "claude": [
+        "",
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+    ],
+    "codex": [
+        "",
+        "gpt-5",
+        "gpt-5-codex",
+    ],
+    "lumo": [""],
+    "perplexity": [""],
+    "aria": [""],
+    "safe_shell": [""],
+}
+
+
 def detect_tools() -> dict[str, str]:
     """Return executable paths for supported local backends."""
     return {
@@ -94,6 +116,55 @@ def detect_tools() -> dict[str, str]:
         "pwm": shutil.which("pwm") or "",
         "pwm-mcp": shutil.which("pwm-mcp") or "",
         "aria-handoff": shutil.which("aria-handoff") or "",
+    }
+
+
+def backend_status() -> dict[str, dict[str, Any]]:
+    """Report per-backend availability + curated model list for the UI."""
+    paths = detect_tools()
+    return {
+        "codex": {
+            "label": "Codex CLI",
+            "available": bool(paths["codex"]),
+            "path": paths["codex"],
+            "models": BACKEND_MODELS["codex"],
+            "uses": "codex exec (CLI login, no API key)",
+        },
+        "claude": {
+            "label": "Claude Code CLI",
+            "available": bool(paths["claude"]),
+            "path": paths["claude"],
+            "models": BACKEND_MODELS["claude"],
+            "uses": "claude -p (CLI login, no API key)",
+        },
+        "lumo": {
+            "label": "Lumo",
+            "available": bool(paths["lumo-offload"]),
+            "path": paths["lumo-offload"],
+            "models": BACKEND_MODELS["lumo"],
+            "uses": "lumo-offload (bounded local microtasks)",
+        },
+        "perplexity": {
+            "label": "Perplexity",
+            "available": bool(paths["pwm"]),
+            "path": paths["pwm"],
+            "models": BACKEND_MODELS["perplexity"],
+            "uses": "pwm ask (Perplexity Web CLI)",
+        },
+        "aria": {
+            "label": ".aria handoff",
+            "available": bool(paths["aria-handoff"]),
+            "path": paths["aria-handoff"],
+            "models": BACKEND_MODELS["aria"],
+            "uses": "aria-handoff (repo-local ledger)",
+        },
+        "safe_shell": {
+            "label": "Safe shell",
+            "available": True,
+            "path": "",
+            "models": BACKEND_MODELS["safe_shell"],
+            "uses": "small read-only allowlist (git status, df, free, ...)",
+        },
     }
 
 
@@ -168,10 +239,26 @@ def route_text(text: str) -> RouteDecision:
 
 
 def execute_route(
-    text: str, repo_path: str | None = None, dry_run: bool = False
+    text: str,
+    repo_path: str | None = None,
+    dry_run: bool = False,
+    *,
+    backend_override: str | None = None,
+    model: str | None = None,
 ) -> ToolResult:
-    """Route and optionally execute a cockpit request."""
-    decision = route_text(text)
+    """Route and optionally execute a cockpit request.
+
+    If ``backend_override`` is set, skip auto-routing and dispatch directly to
+    that backend. ``model`` is forwarded to Codex/Claude via ``--model``.
+    """
+    if backend_override:
+        decision = RouteDecision(
+            backend=backend_override,
+            reason=f"manual override: {backend_override}",
+            action="override",
+        )
+    else:
+        decision = route_text(text)
     repo = _resolve_repo(repo_path)
     available = detect_tools()
     if dry_run or decision.action == "hello":
@@ -181,6 +268,7 @@ def execute_route(
                 "reason": decision.reason,
                 "action": decision.action,
                 "repo": str(repo),
+                "model": model or "",
                 "available": available,
             },
             indent=2,
@@ -189,9 +277,9 @@ def execute_route(
         return ToolResult("filip_route", content=content, success=True)
 
     if decision.backend == "codex":
-        result = codex_delegate(text, repo)
+        result = codex_delegate(text, repo, model=model)
     elif decision.backend == "claude":
-        result = claude_review(text, repo)
+        result = claude_review(text, repo, model=model)
     elif decision.backend == "lumo":
         result = lumo_offload("summarize", text, None, repo)
     elif decision.backend == "perplexity":
@@ -223,7 +311,11 @@ def execute_route(
 
 
 def codex_delegate(
-    objective: str, repo: Path | None = None, include_aria: bool = True
+    objective: str,
+    repo: Path | None = None,
+    include_aria: bool = True,
+    *,
+    model: str | None = None,
 ) -> ToolResult:
     repo = _resolve_repo(str(repo) if repo else None)
     codex = shutil.which("codex")
@@ -240,25 +332,28 @@ def codex_delegate(
             _aria_brief(repo) if include_aria else "",
         ]
     ).strip()
-    result = _run_command(
-        [
-            codex,
-            "exec",
-            "--cd",
-            str(repo),
-            "--sandbox",
-            "workspace-write",
-            "--skip-git-repo-check",
-            prompt,
-        ],
-        cwd=repo,
-        timeout=600,
-    )
+    args = [
+        codex,
+        "exec",
+        "--cd",
+        str(repo),
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+    ]
+    if model:
+        args.extend(["--model", model])
+    args.append(prompt)
+    result = _run_command(args, cwd=repo, timeout=600)
     return _tool_result("codex_adapter", result)
 
 
 def claude_review(
-    objective: str, repo: Path | None = None, include_diff: bool = True
+    objective: str,
+    repo: Path | None = None,
+    include_diff: bool = True,
+    *,
+    model: str | None = None,
 ) -> ToolResult:
     repo = _resolve_repo(str(repo) if repo else None)
     claude = shutil.which("claude")
@@ -285,17 +380,20 @@ def claude_review(
             diff,
         ]
     )
+    args = [
+        claude,
+        "-p",
+        "--permission-mode",
+        "plan",
+        "--tools",
+        "",
+        "--add-dir",
+        str(repo),
+    ]
+    if model:
+        args.extend(["--model", model])
     result = _run_command(
-        [
-            claude,
-            "-p",
-            "--permission-mode",
-            "plan",
-            "--tools",
-            "",
-            "--add-dir",
-            str(repo),
-        ],
+        args,
         cwd=repo,
         input_text=prompt,
         timeout=300,
@@ -822,6 +920,7 @@ class SafeShellTool(BaseTool):
 
 
 __all__ = [
+    "BACKEND_MODELS",
     "AriaHandoffTool",
     "ClaudeAdapterTool",
     "CodexAdapterTool",
@@ -830,6 +929,7 @@ __all__ = [
     "PerplexityAdapterTool",
     "SafeShellTool",
     "aria_handoff",
+    "backend_status",
     "claude_review",
     "codex_delegate",
     "detect_tools",

@@ -145,3 +145,66 @@ class TestCockpitRoutes:
         client = TestClient(_make_app())
         resp = client.post("/v1/cockpit/run", json={"command": "   "})
         assert resp.status_code == 400
+
+    def test_cockpit_backends_endpoint_returns_curated_models(self):
+        client = TestClient(_make_app())
+        resp = client.get("/v1/cockpit/backends")
+        assert resp.status_code == 200
+        backends = resp.json()["backends"]
+        assert "claude" in backends and "codex" in backends
+        assert "claude-opus-4-7" in backends["claude"]["models"]
+        assert "" in backends["claude"]["models"]  # CLI session default
+
+    def test_cockpit_run_rejects_unknown_backend_override(self, tmp_path):
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "hello",
+                "repo_path": str(tmp_path),
+                "dry_run": True,
+                "backend": "not-a-real-backend",
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_cockpit_run_threads_model_through_claude_override(
+        self, monkeypatch, tmp_path
+    ):
+        import shutil
+        import subprocess
+
+        captured: dict[str, list[str]] = {}
+
+        def fake_which(name: str) -> str | None:
+            if name == "claude":
+                return "/usr/local/bin/claude"
+            return None
+
+        def fake_run(args, *, cwd, input_text="", timeout=120):
+            if args[:1] == ["/usr/local/bin/claude"]:
+                captured["args"] = list(args)
+                return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+            # diff probes during claude_review
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(shutil, "which", fake_which)
+        monkeypatch.setattr(filip_cockpit, "_run_command", fake_run)
+
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "review the architecture",
+                "repo_path": str(tmp_path),
+                "dry_run": False,
+                "backend": "claude",
+                "model": "claude-opus-4-7",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "claude"
+        assert data["model"] == "claude-opus-4-7"
+        assert "--model" in captured["args"]
+        assert "claude-opus-4-7" in captured["args"]

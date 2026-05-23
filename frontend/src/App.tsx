@@ -8,9 +8,11 @@ import { GetStartedPage } from './pages/GetStartedPage';
 import { AgentsPage } from './pages/AgentsPage';
 import { DataSourcesPage } from './pages/DataSourcesPage';
 import { FilipCockpitPage } from './pages/FilipCockpitPage';
+import { BackendsPage } from './pages/BackendsPage';
 import { LogsPage } from './pages/LogsPage';
 import { CommandPalette } from './components/CommandPalette';
 import { SetupScreen } from './components/SetupScreen';
+import { useCockpitMode } from './lib/cockpitMode';
 import { Toaster } from './components/ui/sonner';
 import { useAppStore } from './lib/store';
 import { fetchModels, fetchServerInfo, fetchSavings, submitSavings, isTauri } from './lib/api';
@@ -19,6 +21,7 @@ import { UpdateChecker } from './components/Desktop/UpdateChecker';
 import { track, hashId } from './lib/analytics';
 
 export default function App() {
+  const cockpitMode = useCockpitMode();
   const [setupDone, setSetupDone] = useState(!isTauri());
   const handleSetupReady = useCallback(() => {
     setSetupDone(true);
@@ -172,22 +175,29 @@ export default function App() {
   }, [commandPaletteOpen, setCommandPaletteOpen, toggleSystemPanel]);
 
 
-  if (!setupDone) {
+  // SetupScreen is for the full inference stack (Ollama + model + server).
+  // In cockpit mode we skip it entirely — cockpit has no engine and needs
+  // no setup.
+  if (!setupDone && cockpitMode !== 'cockpit') {
     return <SetupScreen onReady={handleSetupReady} />;
   }
+
+  const indexElement =
+    cockpitMode === 'cockpit' ? <FilipCockpitPage /> : <ChatPage />;
 
   return (
     <>
       <UpdateChecker />
       <Routes>
         <Route element={<Layout />}>
-          <Route index element={<ChatPage />} />
+          <Route index element={indexElement} />
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="get-started" element={<GetStartedPage />} />
           <Route path="data-sources" element={<DataSourcesPage />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="filip-cockpit" element={<FilipCockpitPage />} />
+          <Route path="backends" element={<BackendsPage />} />
           <Route path="logs" element={<LogsPage />} />
         </Route>
       </Routes>

@@ -255,12 +255,15 @@ export interface CockpitRunRequest {
   command: string;
   repo_path: string;
   dry_run: boolean;
+  backend?: string | null;
+  model?: string | null;
 }
 
 export interface CockpitRunResponse {
   backend: string;
   reason: string;
   action: string;
+  model?: string;
   success: boolean;
   result: string;
   available: Record<string, string>;
@@ -276,6 +279,24 @@ export async function runCockpit(body: CockpitRunRequest): Promise<CockpitRunRes
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(detail.detail || `Cockpit request failed: ${res.status}`);
   }
+  return res.json();
+}
+
+export interface CockpitBackendInfo {
+  label: string;
+  available: boolean;
+  path: string;
+  models: string[];
+  uses: string;
+}
+
+export interface CockpitBackendsResponse {
+  backends: Record<string, CockpitBackendInfo>;
+}
+
+export async function fetchCockpitBackends(): Promise<CockpitBackendsResponse> {
+  const res = await fetch(`${getBase()}/v1/cockpit/backends`);
+  if (!res.ok) throw new Error(`Backends request failed: ${res.status}`);
   return res.json();
 }
 

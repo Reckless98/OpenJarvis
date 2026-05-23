@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { ConversationList } from './ConversationList';
 import { useAppStore } from '../../lib/store';
+import { useCockpitMode } from '../../lib/cockpitMode';
 
 export function Sidebar() {
   const navigate = useNavigate();
@@ -53,16 +54,25 @@ export function Sidebar() {
     navigate('/');
   };
 
-  const navItems = [
-    { path: '/', icon: MessageSquare, label: 'Chat' },
-    { path: '/dashboard', icon: BarChart3, label: 'Dashboard' },
-    { path: '/data-sources', icon: Database, label: 'Data Sources' },
-    { path: '/agents', icon: Bot, label: 'Agents' },
-    { path: '/filip-cockpit', icon: SquareTerminal, label: 'Filip Cockpit' },
-    { path: '/logs', icon: ScrollText, label: 'Logs' },
-    { path: '/settings', icon: Settings, label: 'Settings' },
-    { path: '/get-started', icon: Rocket, label: 'Get Started' },
-  ];
+  const cockpitMode = useCockpitMode();
+  const navItems =
+    cockpitMode === 'cockpit'
+      ? [
+          { path: '/', icon: SquareTerminal, label: 'Filip Cockpit' },
+          { path: '/backends', icon: Cpu, label: 'Backends' },
+          { path: '/logs', icon: ScrollText, label: 'Logs' },
+        ]
+      : [
+          { path: '/', icon: MessageSquare, label: 'Chat' },
+          { path: '/dashboard', icon: BarChart3, label: 'Dashboard' },
+          { path: '/data-sources', icon: Database, label: 'Data Sources' },
+          { path: '/agents', icon: Bot, label: 'Agents' },
+          { path: '/filip-cockpit', icon: SquareTerminal, label: 'Filip Cockpit' },
+          { path: '/backends', icon: Cpu, label: 'Backends' },
+          { path: '/logs', icon: ScrollText, label: 'Logs' },
+          { path: '/settings', icon: Settings, label: 'Settings' },
+          { path: '/get-started', icon: Rocket, label: 'Get Started' },
+        ];
 
   return (
     <>
@@ -128,7 +138,8 @@ export function Sidebar() {
             </div>
           </div>
 
-          {/* Model badge */}
+          {/* Model badge (full mode only — cockpit mode picks model per backend on the cockpit page) */}
+          {cockpitMode !== 'cockpit' && (
           <button
             onClick={() => setCommandPaletteOpen(true)}
             className="mx-3 mb-2 flex items-center gap-2 px-3 py-2 rounded-lg text-xs transition-colors cursor-pointer"
@@ -169,29 +180,33 @@ export function Sidebar() {
               </kbd>
             )}
           </button>
+          )}
 
-          {/* Search */}
-          <div className="px-3 mb-2">
-            <div
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm"
-              style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
-            >
-              <Search size={14} style={{ color: 'var(--color-text-tertiary)' }} />
-              <input
-                type="text"
-                placeholder="Search chats..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="flex-1 bg-transparent outline-none text-sm"
-                style={{ color: 'var(--color-text)' }}
-              />
-            </div>
-          </div>
-
-          {/* Conversation list */}
-          <div className="flex-1 overflow-y-auto px-2">
-            <ConversationList searchQuery={searchQuery} />
-          </div>
+          {/* Search + conversation list (full mode only) */}
+          {cockpitMode !== 'cockpit' && (
+            <>
+              <div className="px-3 mb-2">
+                <div
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm"
+                  style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
+                >
+                  <Search size={14} style={{ color: 'var(--color-text-tertiary)' }} />
+                  <input
+                    type="text"
+                    placeholder="Search chats..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="flex-1 bg-transparent outline-none text-sm"
+                    style={{ color: 'var(--color-text)' }}
+                  />
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto px-2">
+                <ConversationList searchQuery={searchQuery} />
+              </div>
+            </>
+          )}
+          {cockpitMode === 'cockpit' && <div className="flex-1" />}
 
           {/* Bottom nav */}
           <nav className="px-2 pb-3 pt-2 flex flex-col gap-0.5" style={{ borderTop: '1px solid var(--color-border)' }}>

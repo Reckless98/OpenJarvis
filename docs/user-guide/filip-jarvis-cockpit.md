@@ -103,7 +103,49 @@ text command -> router -> Codex/Claude/Lumo/Perplexity/.aria/shell -> response/l
 
 After that, add STT/TTS and a wake layer that feeds the same router.
 
-## Status (Phase 2 baseline)
+## Cockpit-only mode (no API keys, no Ollama)
+
+`cockpit_app.py` is a cockpit-only backend with no inference engine. When the
+frontend detects `engine === "cockpit"` via `GET /v1/info`, it switches into
+cockpit-only UX:
+
+- Sidebar hides Chat / Dashboard / Agents / Data Sources / Settings /
+  Get Started.
+- `/` lands on `/filip-cockpit` directly.
+- `SetupScreen` (Ollama + model + server) is bypassed.
+- A `/backends` page replaces Settings/Models. It shows CLI bridge status
+  (Codex, Claude Code, Lumo, Perplexity, .aria, safe shell) and lets you pick
+  a preferred Anthropic / OpenAI model per backend — **without any API-key
+  input**. Models are passed to `claude -p --model X` / `codex exec --model X`
+  using the existing CLI logins.
+
+The full surface (with Chat/Agents/Settings) is still available by running
+`uv run jarvis serve` instead of `cockpit_app:app`; both mount the same
+`/v1/cockpit/run` and `/v1/cockpit/backends` routes.
+
+## Wake + voice (Tony Stark mode)
+
+On `/filip-cockpit`:
+
+- **Wake mode** toggle: Off / Clap-clap / Always-on.
+- **Clap detector** uses `AudioContext` + `AnalyserNode` entirely in the
+  browser; no audio leaves the device. Two RMS spikes within 1.5s fire the
+  wake action.
+- On wake, the page plays `/wake.mp3` if you drop one in `frontend/public/`;
+  otherwise it synthesizes a short three-note chord with `OscillatorNode` so
+  the experience works out of the box.
+- **STT**: `SpeechRecognition` (Chrome/Edge full, Safari recent; Firefox falls
+  back to push-to-talk via the mic button).
+- **TTS**: `speechSynthesis` reads replies aloud when the TTS toggle is on.
+- Voice/wake are **off by default**, require a user gesture to start the
+  AudioContext, show a visible "listening" indicator with a mic-level meter,
+  and never send raw audio off-device.
+
+After STT resolves, the transcript is posted to `POST /v1/cockpit/run`
+exactly like a typed command — same routing, same Codex/Claude/Lumo/
+Perplexity/.aria/safe-shell backends.
+
+## Status (Phase 3 baseline)
 
 - **Plan:** Phase 1 (CLI router + `filip_cockpit` tool) and Phase 2 (browser
   surface at `/filip-cockpit` over the same router) are shipped. Phase 3
