@@ -296,7 +296,7 @@ export interface CockpitBackendsResponse {
 
 export async function fetchCockpitBackends(): Promise<CockpitBackendsResponse> {
   const res = await fetch(`${getBase()}/v1/cockpit/backends`);
-  if (!res.ok) throw new Error(`Backends request failed: ${res.status}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 

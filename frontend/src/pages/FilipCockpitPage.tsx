@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -14,6 +14,7 @@ import {
   VolumeX,
   XCircle,
 } from 'lucide-react';
+import { JarvisCircle, type JarvisState } from '../components/JarvisCircle';
 import { fetchCockpitBackends, runCockpit } from '../lib/api';
 import type { CockpitBackendInfo, CockpitRunResponse } from '../lib/api';
 import {
@@ -23,6 +24,7 @@ import {
 } from '../lib/cockpitPrefs';
 import { useClapDetector } from '../lib/useClapDetector';
 import { useVoice } from '../lib/useVoice';
+import { playWakeCue } from '../lib/wakeSounds';
 
 const QUICK_ACTIONS = [
   { label: 'Hello', command: 'hello' },
@@ -54,44 +56,6 @@ function missingTools(result: CockpitRunResponse | null): string[] {
     .map(([, label]) => label);
 }
 
-/**
- * Try playing /wake.mp3 if the user provided one; otherwise synthesize a short
- * three-note chord with OscillatorNodes so the experience works out of the box.
- */
-async function playWakeSound() {
-  try {
-    const audio = new Audio('/wake.mp3');
-    audio.volume = 0.85;
-    await audio.play();
-    return;
-  } catch {
-    /* fall through to synthesized fallback */
-  }
-  try {
-    const Ctx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    const ctx = new Ctx();
-    const now = ctx.currentTime;
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.001, now);
-    gain.gain.exponentialRampToValueAtTime(0.25, now + 0.05);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
-    gain.connect(ctx.destination);
-    [392, 523.25, 659.25].forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, now + i * 0.05);
-      osc.connect(gain);
-      osc.start(now + i * 0.05);
-      osc.stop(now + 1.0);
-    });
-    setTimeout(() => ctx.close().catch(() => {}), 1200);
-  } catch {
-    /* nothing else to do */
-  }
-}
-
 export function FilipCockpitPage() {
   const [command, setCommand] = useState('hello');
   const [repoPath, setRepoPath] = useState('~/Projects/OpenJarvis');
@@ -101,14 +65,23 @@ export function FilipCockpitPage() {
   const [loading, setLoading] = useState(false);
   const [prefs, setPrefs] = useState<CockpitPrefs>(() => loadCockpitPrefs());
   const [backends, setBackends] = useState<Record<string, CockpitBackendInfo> | null>(null);
+  const [backendsError, setBackendsError] = useState<string>('');
   const [backendOverride, setBackendOverride] = useState<string>('');
   const [modelOverride, setModelOverride] = useState<string>('');
   const [statusLine, setStatusLine] = useState('');
+  const stopContinuousRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     fetchCockpitBackends()
-      .then((res) => setBackends(res.backends))
-      .catch(() => setBackends({}));
+      .then((res) => {
+        setBackends(res.backends);
+        setBackendsError('');
+      })
+      .catch((exc) => {
+        setBackends({});
+        const msg = exc instanceof Error ? exc.message : 'request failed';
+        setBackendsError(msg);
+      });
   }, []);
 
   // Sync override defaults from saved prefs once backends arrive.
@@ -165,7 +138,7 @@ export function FilipCockpitPage() {
   };
 
   const wakeAndListen = async () => {
-    await playWakeSound();
+    await playWakeCue();
     setStatusLine('Listening for command…');
     if (!voice.sttSupported) {
       setStatusLine(
@@ -193,6 +166,43 @@ export function FilipCockpitPage() {
       void wakeAndListen();
     },
   });
+
+  // Always-on wake: run a continuous SR loop and submit on the keyword "jarvis".
+  useEffect(() => {
+    if (prefs.wakeMode !== 'always' || !voice.sttSupported) {
+      stopContinuousRef.current?.();
+      stopContinuousRef.current = null;
+      return;
+    }
+    const stop = voice.listenContinuous((text) => {
+      const lower = text.toLowerCase();
+      if (lower.includes('jarvis') || lower.includes('hey jar')) {
+        const cleaned = text.replace(/(hey )?jarvis[,!:.]?\s*/i, '').trim();
+        if (cleaned) {
+          setCommand(cleaned);
+          void submit(cleaned);
+        } else {
+          void playWakeCue();
+          setStatusLine('Jarvis here — say a command.');
+        }
+      }
+    });
+    stopContinuousRef.current = stop;
+    return () => {
+      stop();
+      stopContinuousRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefs.wakeMode, voice.sttSupported]);
+
+  const jarvisState: JarvisState = loading
+    ? 'thinking'
+    : voice.speaking
+      ? 'talking'
+      : voice.listening || (prefs.wakeMode === 'clap' && clap.ready)
+        ? 'listening'
+        : 'idle';
+  const jarvisLevel = voice.listening ? 0.75 : Math.min(1, clap.level * 2.2);
 
   const pushToTalk = async () => {
     if (!voice.sttSupported) {
@@ -238,6 +248,47 @@ export function FilipCockpitPage() {
             <span>{prefs.ttsEnabled ? 'TTS on' : 'TTS off'}</span>
           </div>
         </header>
+
+        {backendsError && (
+          <div
+            className="rounded-lg p-3 text-xs"
+            style={{
+              background: 'color-mix(in srgb, var(--color-error) 8%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--color-error) 32%, transparent)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            <div className="mb-1 flex items-center gap-1.5 font-medium" style={{ color: 'var(--color-error)' }}>
+              <AlertTriangle size={14} /> Cockpit backend not reachable
+            </div>
+            <div>
+              Could not reach <code>GET /v1/cockpit/backends</code> ({backendsError}). Start it with:
+            </div>
+            <pre
+              className="mt-1.5 overflow-x-auto rounded px-2 py-1 text-[11px]"
+              style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)' }}
+            >
+              uv run --extra server python -m uvicorn openjarvis.server.cockpit_app:app --host 127.0.0.1 --port 8000
+            </pre>
+          </div>
+        )}
+
+        <section
+          className="flex flex-col items-center gap-3 rounded-lg py-6"
+          style={{
+            background:
+              'radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--color-accent) 8%, transparent) 0%, transparent 65%), var(--color-surface)',
+            border: '1px solid var(--color-border)',
+          }}
+        >
+          <JarvisCircle state={jarvisState} level={jarvisLevel} size={220} />
+          <div className="text-xs uppercase tracking-widest" style={{ color: 'var(--color-text-tertiary)' }}>
+            {jarvisState === 'idle' && 'Standby'}
+            {jarvisState === 'listening' && 'Listening'}
+            {jarvisState === 'thinking' && 'Routing'}
+            {jarvisState === 'talking' && 'Speaking'}
+          </div>
+        </section>
 
         <section
           className="grid gap-4 rounded-lg p-4 md:grid-cols-[minmax(0,1fr)_220px]"

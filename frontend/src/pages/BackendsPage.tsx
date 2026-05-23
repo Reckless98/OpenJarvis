@@ -81,7 +81,16 @@ export function BackendsPage() {
               color: 'var(--color-text-secondary)',
             }}
           >
-            {error}
+            <div className="mb-1 font-medium" style={{ color: 'var(--color-error)' }}>
+              Backends request failed: {error}
+            </div>
+            <div>The cockpit backend at <code>127.0.0.1:8000</code> is not reachable. Start it with:</div>
+            <pre
+              className="mt-1.5 overflow-x-auto rounded px-2 py-1 text-[11px]"
+              style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)' }}
+            >
+              uv run --extra server python -m uvicorn openjarvis.server.cockpit_app:app --host 127.0.0.1 --port 8000
+            </pre>
           </div>
         )}
 
