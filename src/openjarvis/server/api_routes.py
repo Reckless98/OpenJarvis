@@ -57,6 +57,12 @@ class OptimizeRunRequest(BaseModel):
     max_samples: int = 50
 
 
+class CockpitRunRequest(BaseModel):
+    command: str
+    repo_path: str = "~/Projects/OpenJarvis"
+    dry_run: bool = True
+
+
 # ---- Agent routes ----
 
 agents_router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -881,6 +887,48 @@ async def start_optimize_run(req: OptimizeRunRequest, request: Request):
     return {"status": "started", "run_id": "placeholder"}
 
 
+# ---- Filip cockpit routes ----
+
+cockpit_router = APIRouter(prefix="/v1/cockpit", tags=["cockpit"])
+
+
+@cockpit_router.post("/run")
+async def run_cockpit(req: CockpitRunRequest, request: Request):
+    """Route a Filip cockpit command through the existing local CLI adapters."""
+    command = req.command.strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="Command is required")
+    try:
+        from starlette.concurrency import run_in_threadpool
+
+        from openjarvis.tools.filip_cockpit import (
+            detect_tools,
+            execute_route,
+            route_text,
+        )
+
+        decision = route_text(command)
+        result = await run_in_threadpool(
+            execute_route,
+            command,
+            req.repo_path,
+            req.dry_run,
+        )
+        return {
+            "backend": decision.backend,
+            "reason": decision.reason,
+            "action": decision.action,
+            "success": result.success,
+            "result": result.content,
+            "available": detect_tools(),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Cockpit command failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 def include_all_routes(app) -> None:
     """Include all extended API routers in a FastAPI app."""
     from openjarvis.server.approval_routes import (
@@ -901,6 +949,7 @@ def include_all_routes(app) -> None:
     app.include_router(speech_router)
     app.include_router(feedback_router)
     app.include_router(optimize_router)
+    app.include_router(cockpit_router)
 
     # Agent Manager routes (if available)
     try:
@@ -950,4 +999,5 @@ __all__ = [
     "speech_router",
     "feedback_router",
     "optimize_router",
+    "cockpit_router",
 ]

@@ -88,6 +88,9 @@ docs/superpowers/
 CLAUDE.md
 .claude/
 
+# Arsenal repo-local handoff state (per-developer)
+.aria/
+
 # Tauri auto-generated schemas
 **/src-tauri/gen/schemas/
 

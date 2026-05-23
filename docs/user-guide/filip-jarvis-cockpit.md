@@ -19,6 +19,26 @@ uv run jarvis cockpit --dry-run "ask Claude to review this diff"
 uv run jarvis cockpit "search latest docs for this library"
 ```
 
+## Browser UI
+
+Start the cockpit-only backend and Vite frontend:
+
+```bash
+uv run --extra server python -m uvicorn openjarvis.server.cockpit_app:app --host 127.0.0.1 --port 8000
+cd frontend
+npm run dev
+```
+
+Open `http://localhost:5173/filip-cockpit`. The page uses the same cockpit
+router as the CLI through `POST /v1/cockpit/run`; it does not require OpenAI or
+Anthropic API keys, and it does not require Ollama for cockpit requests.
+
+If you already have a normal OpenJarvis engine running, `uv run jarvis serve
+--port 8000` also exposes the same cockpit API alongside chat routes.
+
+Use dry-run first for route checks, then disable dry-run for bounded local
+smokes such as `show repo status`.
+
 The route is deterministic:
 
 | Request type | Backend |
@@ -82,3 +102,23 @@ text command -> router -> Codex/Claude/Lumo/Perplexity/.aria/shell -> response/l
 ```
 
 After that, add STT/TTS and a wake layer that feeds the same router.
+
+## Status (Phase 2 baseline)
+
+- **Plan:** Phase 1 (CLI router + `filip_cockpit` tool) and Phase 2 (browser
+  surface at `/filip-cockpit` over the same router) are shipped. Phase 3
+  (voice + clap wake) is deferred.
+- **Risks:** `cockpit_app.py` exposes intentionally empty bootstrap endpoints
+  (`/v1/models`, `/v1/info`, `/v1/savings`, `/v1/managed-agents`,
+  `/v1/approvals/pending`) so the existing frontend can load without a chat
+  engine — for the full surface use `uv run jarvis serve`. `npm audit`
+  findings and Vite chunk-size warnings remain unaddressed. `.aria/` is
+  per-developer (gitignored).
+- **Tests:** `uv run ruff check` (cockpit surface), `uv run pytest` (48
+  passed across cockpit/CLI/tool test files), `python3 -m py_compile`,
+  `(cd frontend && npm run build)`.
+- **Known issues:** `frontend/node_modules/` must be installed
+  (`cd frontend && npm install`) before the build runs cleanly.
+- **Next step:** Phase 3 — voice/clap wake on `/filip-cockpit` (browser
+  `SpeechRecognition` + `AudioContext` RMS, toggle off by default, no API
+  keys, no server-side audio).

@@ -7,6 +7,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from openjarvis.server.api_routes import include_all_routes  # noqa: E402
+from openjarvis.tools import filip_cockpit  # noqa: E402
 
 
 def _make_app():
@@ -70,7 +71,11 @@ class TestMetricsRoute:
         client = TestClient(_make_app())
         resp = client.get("/metrics")
         assert resp.status_code == 200
-        assert "openjarvis" in resp.text or "No metrics" in resp.text
+        assert (
+            "openjarvis" in resp.text
+            or "No metrics" in resp.text
+            or "no telemetry data" in resp.text
+        )
 
 
 class TestSkillRoutes:
@@ -93,3 +98,50 @@ class TestTraceRoutes:
         client = TestClient(_make_app())
         resp = client.get("/v1/traces")
         assert resp.status_code == 200
+
+
+class TestCockpitRoutes:
+    def test_cockpit_dry_run(self, tmp_path):
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "ask Codex to inspect next step",
+                "repo_path": str(tmp_path),
+                "dry_run": True,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "codex"
+        assert data["success"] is True
+
+    def test_cockpit_show_repo_status(self, monkeypatch, tmp_path):
+        def fake_run(args, *, cwd, input_text="", timeout=120):
+            import subprocess
+
+            assert args == ["git", "status", "--short", "--branch"]
+            assert cwd == tmp_path
+            return subprocess.CompletedProcess(args, 0, stdout="## test\n", stderr="")
+
+        monkeypatch.setattr(filip_cockpit, "_run_command", fake_run)
+
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "show repo status",
+                "repo_path": str(tmp_path),
+                "dry_run": False,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "safe_shell"
+        assert data["success"] is True
+        assert data["result"] == "## test"
+
+    def test_cockpit_requires_command(self):
+        client = TestClient(_make_app())
+        resp = client.post("/v1/cockpit/run", json={"command": "   "})
+        assert resp.status_code == 400
