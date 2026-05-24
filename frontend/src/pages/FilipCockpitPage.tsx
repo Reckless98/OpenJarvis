@@ -68,6 +68,43 @@ const BACKEND_SPOKEN: Record<string, string> = {
   launcher: 'the app launcher',
 };
 
+// Stark-coded wake acknowledgements. Picked at random when a wake fires
+// without a follow-up command, so Jarvis never says the same thing twice
+// in a row. All phrased in the Edwardian-valet register Tony's J.A.R.V.I.S.
+// uses on screen.
+const STARK_WAKE_LINES: string[] = [
+  'Welcome back, sir. How may I be of service?',
+  'At your service, sir.',
+  'Standing by, sir.',
+  'All systems nominal, sir. What can I do for you?',
+  'You rang, sir?',
+  'Online and listening, sir.',
+  'Ready when you are, sir.',
+];
+
+// Stark-coded boot tails — appended to the time-of-day greeting so the
+// boot sequence has a little theatre to it without sounding scripted.
+const STARK_BOOT_TAILS: string[] = [
+  'All systems nominal.',
+  'Diagnostics complete — everything green.',
+  'Standing by, sir.',
+  'At your service.',
+  'Ready when you are, sir.',
+];
+
+function pickRandom<T>(items: T[]): T {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function timeGreeting(date: Date = new Date()): string {
+  const h = date.getHours();
+  if (h < 5) return 'Burning the midnight oil, sir.';
+  if (h < 12) return 'Good morning, sir.';
+  if (h < 17) return 'Good afternoon, sir.';
+  if (h < 22) return 'Good evening, sir.';
+  return 'Good evening, sir.';
+}
+
 /**
  * Turn a cockpit response into a one-line spoken sentence Jarvis-style.
  * - Dry-run JSON dump → "Routed to <backend>, sir."
@@ -81,11 +118,20 @@ function speakableResult(response: CockpitRunResponse): string {
     const backendName = BACKEND_SPOKEN[response.backend] ?? response.backend;
     return `Done with ${backendName}, sir.`;
   }
-  const looksLikeJson = raw.startsWith('{') || raw.startsWith('[');
-  if (looksLikeJson) {
-    const backendName = BACKEND_SPOKEN[response.backend] ?? response.backend;
-    const tail = response.model ? ` using ${response.model}` : '';
-    return `Routed to ${backendName}${tail}, sir.`;
+  // Only treat the content as a dry-run echo if it actually parses as the
+  // RouteDecision payload (object with a `backend` field). A Claude reply
+  // that happens to start with `{` should NOT be silenced — speak it.
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && 'backend' in parsed) {
+        const backendName = BACKEND_SPOKEN[response.backend] ?? response.backend;
+        const tail = response.model ? ` using ${response.model}` : '';
+        return `Routed to ${backendName}${tail}, sir.`;
+      }
+    } catch {
+      /* not JSON — fall through and speak the raw text. */
+    }
   }
   if (response.backend === 'safe_shell') {
     // Git/status output is multi-line; one-line summary instead of read-aloud.
@@ -107,7 +153,9 @@ function speakableResult(response: CockpitRunResponse): string {
 export function FilipCockpitPage() {
   const [command, setCommand] = useState('hello');
   const [repoPath, setRepoPath] = useState('~/Projects/OpenJarvis');
-  const [dryRun, setDryRun] = useState(true);
+  // Phase 3: live execution is the default. Flip the checkbox manually if
+  // you want a safety preview before a real Codex / Claude / Playwright run.
+  const [dryRun, setDryRun] = useState(false);
   const [result, setResult] = useState<CockpitRunResponse | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -172,7 +220,31 @@ export function FilipCockpitPage() {
           ? `Routed to ${response.backend}${response.model ? ` (${response.model})` : ''}`
           : `Failed on ${response.backend}`,
       );
-      if (prefs.ttsEnabled && response.success) {
+      // Clarify flow: when a tool returns action='clarify', the `result`
+      // is the question Jarvis wants to ask. Speak it, listen once for
+      // the answer, then re-submit the original command + answer so the
+      // tool can continue with the missing info.
+      if (
+        prefs.ttsEnabled
+        && response.success
+        && response.action === 'clarify'
+        && response.result
+      ) {
+        const question = response.result.slice(0, 280);
+        voice.speak(question);
+        try {
+          if (voice.sttSupported) {
+            const answer = await voice.listenOnce();
+            if (answer && answer.trim()) {
+              const merged = `${next} — ${answer.trim()}`;
+              setCommand(merged);
+              void submit(merged);
+            }
+          }
+        } catch {
+          /* listen error already surfaces in voice.error; non-fatal. */
+        }
+      } else if (prefs.ttsEnabled && response.success) {
         voice.speak(speakableResult(response));
       }
     } catch (exc) {
@@ -186,8 +258,12 @@ export function FilipCockpitPage() {
   };
 
   const wakeAndListen = async () => {
+    // Stark-style wake: a short, very dim riff under the cue + voice so
+    // the listener hears Jarvis "spin up" before he asks for orders. The
+    // riff is non-blocking — we don't await it.
+    void bootRiff({ volume: 0.15, maxDurationMs: 5_000, fadeMs: 600 });
     await playWakeCue();
-    setStatusLine('Listening for command…');
+    setStatusLine('Listening for command, sir…');
     if (!voice.sttSupported) {
       setStatusLine(
         'Wake fired, but SpeechRecognition is unavailable in this browser. Use the mic button or type your command.',
@@ -209,30 +285,58 @@ export function FilipCockpitPage() {
   };
 
   const clap = useClapDetector({
-    enabled: prefs.wakeMode === 'clap',
+    enabled: prefs.wakeMode === 'clap' || prefs.wakeMode === 'all',
     onClap: () => {
       void wakeAndListen();
     },
   });
 
-  // Always-on wake: run a continuous SR loop and submit on the keyword "jarvis".
+  // Always-on wake: run a continuous SR loop and submit when any wake phrase
+  // is heard. Phrases: "jarvis", "hey jarvis", "wake up", "daddy's home"
+  // (and the apostrophe-less "daddy home" — STT often drops the contraction).
   useEffect(() => {
-    if (prefs.wakeMode !== 'always' || !voice.sttSupported) {
+    const phraseWakeArmed = prefs.wakeMode === 'always' || prefs.wakeMode === 'all';
+    if (!phraseWakeArmed || !voice.sttSupported) {
       stopContinuousRef.current?.();
       stopContinuousRef.current = null;
       return;
     }
+    // Order matters: longer / more specific phrases first so the cleaner
+    // strips the full wake phrase before the shorter ones can match.
+    const wakePhrases: RegExp[] = [
+      /\b(hey )?jarvis[,!:.]?\s*/i,
+      /\bdaddy['’]?s home[,!:.]?\s*/i,
+      /\bdaddy home[,!:.]?\s*/i,
+      /\bwake up( jarvis)?[,!:.]?\s*/i,
+    ];
+    const matchesWake = (lower: string): boolean =>
+      lower.includes('jarvis')
+      || lower.includes('hey jar')
+      || lower.includes('wake up')
+      || lower.includes("daddy's home")
+      || lower.includes('daddys home')
+      || lower.includes('daddy home');
+
     const stop = voice.listenContinuous((text) => {
       const lower = text.toLowerCase();
-      if (lower.includes('jarvis') || lower.includes('hey jar')) {
-        const cleaned = text.replace(/(hey )?jarvis[,!:.]?\s*/i, '').trim();
-        if (cleaned) {
-          setCommand(cleaned);
-          void submit(cleaned);
-        } else {
-          void playWakeCue();
-          setStatusLine('Jarvis here — say a command.');
+      if (!matchesWake(lower)) return;
+      let cleaned = text;
+      for (const re of wakePhrases) {
+        cleaned = cleaned.replace(re, '');
+      }
+      cleaned = cleaned.trim();
+      if (cleaned) {
+        setCommand(cleaned);
+        void submit(cleaned);
+      } else {
+        // Bare wake — give it the full Stark treatment: dimmed riff under
+        // the cue, then a randomized Jarvis acknowledgement.
+        void bootRiff({ volume: 0.15, maxDurationMs: 5_000, fadeMs: 600 });
+        void playWakeCue();
+        if (prefs.ttsEnabled) {
+          voice.speak(pickRandom(STARK_WAKE_LINES));
         }
+        setStatusLine('Jarvis online — awaiting your command, sir.');
       }
     });
     stopContinuousRef.current = stop;
@@ -247,19 +351,21 @@ export function FilipCockpitPage() {
     ? 'thinking'
     : voice.speaking
       ? 'talking'
-      : voice.listening || (prefs.wakeMode === 'clap' && clap.ready)
+      : voice.listening
+          || ((prefs.wakeMode === 'clap' || prefs.wakeMode === 'all') && clap.ready)
         ? 'listening'
         : 'idle';
   const jarvisLevel = voice.listening ? 0.75 : Math.min(1, clap.level * 2.2);
 
   const bootJarvis = async () => {
-    setStatusLine('Booting Jarvis…');
+    setStatusLine('Booting Jarvis — running pre-flight diagnostics…');
     // Riff plays dimmed in the background for ~25s; Jarvis speaks overlaid.
-    await bootRiff({ volume: 0.35, maxDurationMs: 25_000, fadeMs: 1500 });
+    void bootRiff({ volume: 0.35, maxDurationMs: 25_000, fadeMs: 1500 });
     if (prefs.ttsEnabled) {
-      voice.speak('Welcome home, Sir. Jarvis online and at your service.');
+      const greeting = `${timeGreeting()} Jarvis online. ${pickRandom(STARK_BOOT_TAILS)}`;
+      voice.speak(greeting);
     }
-    setStatusLine('Jarvis online — at your service, Sir.');
+    setStatusLine('Jarvis online — all systems nominal, sir.');
   };
 
   const pushToTalk = async () => {
@@ -479,7 +585,7 @@ export function FilipCockpitPage() {
               Wake
             </span>
             <div className="flex items-center gap-1">
-              {(['off', 'clap', 'always'] as const).map((mode) => (
+              {(['off', 'clap', 'always', 'all'] as const).map((mode) => (
                 <button
                   key={mode}
                   onClick={() => persist({ ...prefs, wakeMode: mode })}
@@ -496,7 +602,13 @@ export function FilipCockpitPage() {
                     border: '1px solid var(--color-border)',
                   }}
                 >
-                  {mode === 'off' ? 'Off' : mode === 'clap' ? 'Clap-clap' : 'Always-on'}
+                  {mode === 'off'
+                    ? 'Off'
+                    : mode === 'clap'
+                      ? 'Clap-clap'
+                      : mode === 'always'
+                        ? 'Phrase'
+                        : 'All'}
                 </button>
               ))}
             </div>
@@ -580,7 +692,7 @@ export function FilipCockpitPage() {
           </div>
         </section>
 
-        {prefs.wakeMode === 'clap' && (
+        {(prefs.wakeMode === 'clap' || prefs.wakeMode === 'all') && (
           <section
             className="flex items-center gap-3 rounded-lg p-3 text-xs"
             style={{

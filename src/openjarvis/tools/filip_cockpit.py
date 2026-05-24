@@ -104,15 +104,60 @@ BACKEND_MODELS: dict[str, list[str]] = {
     "aria": [""],
     "safe_shell": [""],
     "launcher": [""],
+    "make_project": [""],
+    "playwright": [""],
 }
 
 
 JARVIS_PERSONA = (
-    "You are JARVIS, the AI assistant from Iron Man. "
-    "Address the user as 'Sir' throughout. Be concise, dry, witty, "
-    "and unfailingly polite. Use UK English. One short paragraph max for "
-    "casual exchanges. Never mention being a large language model. When "
-    "you cannot do something, say so plainly and suggest the next step."
+    "You are Jarvis — a calm, intelligent British AI butler in the style of "
+    "an Edwardian valet with a modern technical vocabulary. "
+    "\n\n"
+    "Voice and rhythm:\n"
+    "- Use UK English. Measured, polished, never slangy. No emojis, no "
+    "modern internet phrasing, no excess enthusiasm.\n"
+    "- Short declarative sentences. Front-load the key fact, then add one "
+    "concise qualification if useful. Stop. Do not pad.\n"
+    "- One short paragraph maximum for casual exchanges. Two for status "
+    "reports. Never more.\n"
+    "\n"
+    "How to address the user:\n"
+    "- Always 'sir'. Place it naturally — usually at the end of a sentence "
+    "or after the first clause, separated by a comma. Never capitalise it "
+    "mid-sentence; it is an address, not a name.\n"
+    "\n"
+    "Acknowledgments (use these patterns, do not over-explain agreement):\n"
+    "- 'At your service, sir.' / 'Will do, sir.' / 'As you wish, sir.' / "
+    "'For you sir, always.' / 'Right away, sir.' / 'Noted, sir.'\n"
+    "\n"
+    "Status and progress reports:\n"
+    "- Lead with the number or label, then the implication. "
+    "Example: 'Repo on filip-jarvis-cockpit, three changes staged, sir.' "
+    "Example: 'Branch is clean, sir. Nothing to commit.'\n"
+    "\n"
+    "Warnings and bad news:\n"
+    "- Calm, precise, restrained. Never alarmist. "
+    "Example: 'Sir, the launcher could not find a registered browser. May "
+    "I suggest installing one.' A faint dry edge is allowed when the user "
+    "asks for the obviously impossible.\n"
+    "\n"
+    "Humour:\n"
+    "- Understated, very British, used sparingly. A gentle needle-prick at "
+    "most, never sarcastic at the user's expense. Reserve it for benign "
+    "corrections or for self-aware notes on your own limits.\n"
+    "- Permissible Tony-coded touches when the moment calls for them: "
+    "'I've also prepared a safety briefing for you to entirely ignore, sir.' "
+    "'There's only so much I can do, sir, when you give the world's press "
+    "your home address.' 'For you sir, always.' Use these as inspiration "
+    "for tone — do not quote them verbatim every time.\n"
+    "\n"
+    "Hard rules:\n"
+    "- Never claim to be a large language model or mention any underlying "
+    "provider. You are Jarvis.\n"
+    "- When you cannot do something, say so plainly in one sentence and "
+    "suggest the next concrete step.\n"
+    "- Do not roleplay any character other than Jarvis. Do not break "
+    "persona, even when teased."
 )
 
 
@@ -134,6 +179,20 @@ LAUNCHER_TARGETS: dict[str, list[str]] = {
     "claude": ["xdg-open", "https://claude.ai/"],
     "chatgpt": ["xdg-open", "https://chatgpt.com/"],
 }
+
+
+# Used only when xdg-open has no registered http handler.
+# Order matters: prefer the most common, sandbox-safe browsers first.
+BROWSER_FALLBACKS: list[str] = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "brave-browser",
+    "vivaldi",
+    "microsoft-edge",
+    "firefox",
+]
 
 
 def detect_tools() -> dict[str, str]:
@@ -202,7 +261,50 @@ def backend_status() -> dict[str, dict[str, Any]]:
             "models": BACKEND_MODELS["launcher"],
             "uses": "xdg-open with a fixed allowlist (browser, files, music, ...)",
         },
+        "make_project": {
+            "label": "Project scaffold",
+            "available": _PROJECTS_ROOT.parent.exists(),
+            "path": str(_PROJECTS_ROOT),
+            "models": BACKEND_MODELS["make_project"],
+            "uses": "mkdir + git init under ~/Projects/<name>",
+        },
+        "playwright": {
+            "label": "Playwright bridge",
+            "available": _playwright_available(),
+            "path": "",
+            "models": BACKEND_MODELS["playwright"],
+            "uses": (
+                "persistent profile at ~/.openjarvis/playwright-profile "
+                "(auto headed/headless)"
+            ),
+        },
     }
+
+
+def _playwright_available() -> bool:
+    """True iff the playwright package is importable AND a system browser is
+    discoverable (we drive a system Chrome via executable_path, not the
+    Playwright-downloaded chromium — saves a 150MB download and works on
+    OS releases Playwright doesn't formally support).
+    """
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("playwright") is None:
+            return False
+    except Exception:
+        return False
+    for binary in (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "brave-browser",
+        "microsoft-edge",
+    ):
+        if shutil.which(binary):
+            return True
+    return False
 
 
 def route_text(text: str) -> RouteDecision:
@@ -212,6 +314,56 @@ def route_text(text: str) -> RouteDecision:
     # the router can be exercised without spending CLI tokens.
     if lowered in {"hello", "ping", "test", ""}:
         return RouteDecision("safe_shell", "router ping / debug", "hello")
+    # Explicit-name addressing — "ask codex to ..." / "have claude ..." wins
+    # over every keyword heuristic below. Without this, a phrase like
+    # "ask codex to implement a new todo app" matches the Lumo `todo`
+    # keyword before the Codex `implement` keyword, sending Codex work to
+    # the wrong backend.
+    if "ask codex" in lowered or "have codex" in lowered or "tell codex" in lowered:
+        return RouteDecision("codex", "explicit Codex address", "delegate")
+    if "ask claude" in lowered or "have claude" in lowered or "tell claude" in lowered:
+        return RouteDecision("claude", "explicit Claude address", "review")
+    if "ask lumo" in lowered or "have lumo" in lowered or "tell lumo" in lowered:
+        return RouteDecision("lumo", "explicit Lumo address", "offload")
+    if (
+        "ask perplexity" in lowered
+        or "have perplexity" in lowered
+        or "tell perplexity" in lowered
+    ):
+        return RouteDecision("perplexity", "explicit Perplexity address", "search")
+    # Project scaffolding — "make me a project X" / "create a new project X".
+    # Has to land BEFORE the generic launcher branch because "make" / "create"
+    # don't start with open/launch/play but they're still side-effecting.
+    if (
+        "make me a project" in lowered
+        or "create a new project" in lowered
+        or "create a project" in lowered
+        or "scaffold a project" in lowered
+        or "new project called" in lowered
+        or "new project named" in lowered
+    ):
+        return RouteDecision(
+            "make_project", "scaffold a new ~/Projects/<name>", "scaffold"
+        )
+    # Browser automation — explicit asks routed to Playwright bridge.
+    # Examples: "log in to <site>", "open youtube and search for ...",
+    # "post a tweet ...", "click the play button on this page". Lands
+    # above the launcher branch so "log in" doesn't fall through.
+    if (
+        "log in to " in lowered
+        or "login to " in lowered
+        or "browse to " in lowered
+        or "drive the browser" in lowered
+        or lowered.startswith("click ")
+        or lowered.startswith("fill ")
+        or lowered.startswith("type into ")
+        or lowered.startswith("screenshot ")
+        or ("youtube" in lowered and "search" in lowered)
+        or ("github" in lowered and (" star " in lowered or " comment " in lowered))
+    ):
+        return RouteDecision(
+            "playwright", "browser automation requested", "navigate"
+        )
     # Launcher intent — "open X" / "launch X" / "play X" maps to xdg-open
     # against a fixed allowlist (see LAUNCHER_TARGETS).
     if (
@@ -232,9 +384,70 @@ def route_text(text: str) -> RouteDecision:
         )
     ):
         return RouteDecision("aria", ".aria continuity request", "handoff")
+    # Multi-model debate via `pwm council` — costs 4 Pro Searches, so gate
+    # this strictly to explicit "ask multiple models" intents. Lands above
+    # the generic Perplexity branch so council wins when both would match.
+    if any(
+        phrase in lowered
+        for phrase in (
+            "council",
+            "second opinion",
+            "multiple opinions",
+            "ask the council",
+            "ask all models",
+            "debate this",
+            "have them debate",
+            "compare models on",
+            "what does each model think",
+            "consensus view",
+        )
+    ):
+        return RouteDecision(
+            "perplexity", "multi-model debate requested", "council"
+        )
     if any(
         word in lowered
-        for word in ("latest", "current docs", "search", "pricing", "recent", "web")
+        for word in (
+            "latest",
+            "current docs",
+            "search",
+            "pricing",
+            "recent",
+            "web",
+            # Finance / market data — Sonar 2 (cheap) via pwm ask.
+            "stock",
+            "stocks",
+            "ticker",
+            "market",
+            "markets",
+            "price of",
+            "exchange rate",
+            "crypto",
+            "bitcoin",
+            # News / world / weather — current information.
+            "news",
+            "headlines",
+            "weather",
+            "forecast",
+            "score",
+            "scores",
+            "today's",
+            "tonight's",
+            # Current-events phrasing — Claude has no live web access, so
+            # send these to Perplexity even when keywords are conversational.
+            "what's happening",
+            "whats happening",
+            "what is happening",
+            "what's going on",
+            "whats going on",
+            "what is going on",
+            "going on in the world",
+            "situation in the world",
+            "current events",
+            "world news",
+            "in the news",
+            "tell me about the new situation",
+        )
     ):
         return RouteDecision(
             "perplexity", "current external information requested", "search"
@@ -270,7 +483,21 @@ def route_text(text: str) -> RouteDecision:
         )
     if any(
         word in lowered
-        for word in ("implement", "fix", "refactor", "patch", "run tests", "code")
+        for word in (
+            "implement",
+            "fix",
+            "refactor",
+            "patch",
+            "run tests",
+            "code",
+            # Deploy / release verbs — Codex executes via shell, not Claude chat.
+            "deploy",
+            "ship",
+            "release",
+            "rollout",
+            "rollback",
+            "publish",
+        )
     ):
         return RouteDecision("codex", "coding execution requested", "delegate")
     if any(
@@ -338,10 +565,20 @@ def execute_route(
             result = claude_review(text, repo, model=model)
     elif decision.backend == "launcher":
         result = launcher(text)
+    elif decision.backend == "make_project":
+        result = make_project(text)
+    elif decision.backend == "playwright":
+        # Lazy import — Playwright is an optional `browser` extra.
+        from openjarvis.tools.playwright_bridge import playwright_run
+
+        result = playwright_run(text, repo=repo)
     elif decision.backend == "lumo":
         result = lumo_offload("summarize", text, None, repo)
     elif decision.backend == "perplexity":
-        result = perplexity_search(text, repo)
+        if decision.action == "council":
+            result = perplexity_council(text, repo)
+        else:
+            result = perplexity_search(text, repo)
     elif decision.backend == "aria":
         lowered = text.lower()
         if "checkpoint" in lowered:
@@ -514,13 +751,20 @@ def launcher(text: str) -> ToolResult:
     args = LAUNCHER_TARGETS.get(target_name)
     spoken_target = target_name
     if not args and lowered.startswith("play "):
-        # "play <song>" → YouTube Music search URL (xdg-open URL is safe).
-        # urllib.parse.quote keeps + as a safe separator for music.youtube.
+        # "play <song>" → YouTube search with autoplay. Sending to youtube.com
+        # (not music.youtube.com) because YouTube's `search_query` URL plus
+        # `&autoplay=1` is the closest single-URL approximation of "play
+        # this exact track immediately" without driving the DOM. For
+        # DOM-driven "land on the top result and click play", route to
+        # `playwright_bridge` with action="play_youtube".
         from urllib.parse import quote_plus
 
         query = quote_plus(target_name)
-        args = ["xdg-open", f"https://music.youtube.com/search?q={query}"]
-        spoken_target = f"{target_name} on YouTube Music"
+        args = [
+            "xdg-open",
+            f"https://www.youtube.com/results?search_query={query}",
+        ]
+        spoken_target = f"{target_name} on YouTube"
     if not args:
         return ToolResult(
             "launcher",
@@ -541,11 +785,145 @@ def launcher(text: str) -> ToolResult:
             f"Opening {spoken_target}, sir.",
             success=True,
         )
+
+    # xdg-open failed. If we were opening an http(s):// URL, try a known
+    # browser binary directly — this is the common case on minimal desktops
+    # where no www-browser handler is registered with xdg.
+    if (
+        len(args) == 2
+        and args[0] == "xdg-open"
+        and (args[1].startswith("http://") or args[1].startswith("https://"))
+    ):
+        url = args[1]
+        for browser in BROWSER_FALLBACKS:
+            if not shutil.which(browser):
+                continue
+            fallback = _run_command([browser, url], cwd=None, timeout=10)
+            if fallback.returncode == 0:
+                return ToolResult(
+                    "launcher",
+                    f"Opening {spoken_target}, sir.",
+                    success=True,
+                )
+
     detail = result.stderr.strip() or f"exit {result.returncode}"
     return ToolResult(
         "launcher",
         f"Launcher failed for '{target_name}': {detail}",
         success=False,
+    )
+
+
+# Phase 3: project scaffolding. "make me a project todo-app" creates
+# ~/Projects/todo-app/ with git init, README.md, .gitignore. Name is
+# sanitized to [a-z0-9-_]+ to keep launches inside ~/Projects/.
+_PROJECT_NAME_RE = re.compile(r"[^a-z0-9_-]+")
+_PROJECTS_ROOT = Path.home() / "Projects"
+
+
+def _sanitize_project_name(raw: str) -> str:
+    """Lowercase, slugify, strip path separators. Returns '' if invalid."""
+    lowered = raw.strip().lower()
+    slug = _PROJECT_NAME_RE.sub("-", lowered).strip("-_")
+    if not slug or slug in {".", ".."} or "/" in slug:
+        return ""
+    return slug[:64]
+
+
+def _extract_project_name(text: str) -> str:
+    """Pull the project name out of `make me a project called X` style asks.
+
+    Returns '' when no name is actually present (e.g. bare 'make me a
+    project' with nothing after) so the caller can prompt for one rather
+    than scaffolding a folder named 'project'.
+    """
+    lowered = text.lower().strip()
+    # Most specific markers first so "make me a project called X" picks
+    # "X" rather than "called X" or "a project called X".
+    for marker in (" called ", " named ", " project: "):
+        idx = lowered.rfind(marker)
+        if idx >= 0:
+            tail = lowered[idx + len(marker) :].strip()
+            return _sanitize_tail(tail)
+    # Inline form: "make me a project NAME" / "scaffold a project NAME".
+    # Take whatever comes after the last " project " token, but reject
+    # the empty string so a bare "make me a project" doesn't slug to
+    # "project".
+    for marker in (" project ",):
+        idx = lowered.rfind(marker)
+        if idx >= 0:
+            tail = lowered[idx + len(marker) :].strip()
+            sanitized = _sanitize_tail(tail)
+            if sanitized and sanitized != "project":
+                return sanitized
+    return ""
+
+
+def _sanitize_tail(tail: str) -> str:
+    if not tail:
+        return ""
+    # Stop at first quote or comma so "called todo-app, please" → todo-app.
+    for stop in (",", ".", "'", '"', " in ", " for "):
+        cut = tail.find(stop)
+        if cut > 0:
+            tail = tail[:cut]
+    return _sanitize_project_name(tail)
+
+
+def make_project(text: str) -> ToolResult:
+    """Create a project skeleton under ~/Projects/<name>/.
+
+    Layout:
+      ~/Projects/<name>/
+        README.md     — one-line title + creation note
+        .gitignore    — minimal ignore for common transient files
+        .git/         — initialized via `git init -q`
+    """
+    name = _extract_project_name(text)
+    if not name:
+        return ToolResult(
+            "make_project",
+            content=(
+                "I need a project name, sir. Try: 'make me a project called "
+                "<name>' (lowercase, hyphens or underscores only)."
+            ),
+            success=False,
+        )
+    _PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
+    target = _PROJECTS_ROOT / name
+    if target.exists():
+        return ToolResult(
+            "make_project",
+            content=(
+                f"Project '{name}' already exists at {target}. "
+                "Pick a different name or remove the existing folder first."
+            ),
+            success=False,
+        )
+    target.mkdir(parents=True)
+    (target / "README.md").write_text(
+        f"# {name}\n\nCreated by Filip Jarvis Cockpit.\n",
+        encoding="utf-8",
+    )
+    (target / ".gitignore").write_text(
+        "__pycache__/\n.venv/\nnode_modules/\ndist/\n.env\n.env.local\n.DS_Store\n",
+        encoding="utf-8",
+    )
+    git = shutil.which("git")
+    git_status = "skipped (git not on PATH)"
+    if git:
+        result = _run_command([git, "init", "-q"], cwd=target, timeout=15)
+        if result.returncode == 0:
+            git_status = "initialized"
+        else:
+            git_status = f"git init failed: {result.stderr.strip()}"
+    return ToolResult(
+        "make_project",
+        content=(
+            f"Project '{name}' is ready at {target}, sir. "
+            f"README and .gitignore in place; git {git_status}."
+        ),
+        success=True,
     )
 
 
@@ -609,6 +987,24 @@ def perplexity_search(query: str, repo: Path | None = None) -> ToolResult:
         [pwm, "ask", redact(query), "--intent", "quick", "--source", "web"],
         cwd=repo,
         timeout=180,
+    )
+    return _tool_result("perplexity_adapter", result)
+
+
+def perplexity_council(query: str, repo: Path | None = None) -> ToolResult:
+    """Multi-model debate via `pwm council`.
+
+    Costs 4 Pro Searches (3 models + 1 synthesis). Routed only on explicit
+    council intents — see ``route_text`` for the keyword list.
+    """
+    repo = _resolve_repo(str(repo) if repo else None)
+    pwm = shutil.which("pwm")
+    if not pwm:
+        return _missing("perplexity_adapter", "pwm")
+    result = _run_command(
+        [pwm, "council", redact(query), "--source", "web"],
+        cwd=repo,
+        timeout=300,
     )
     return _tool_result("perplexity_adapter", result)
 

@@ -54,6 +54,91 @@ def test_route_text_selects_expected_backends() -> None:
     assert route_text("show GPU/system status").backend == "safe_shell"
 
 
+def test_route_text_routes_finance_news_weather_to_perplexity() -> None:
+    """Cheap Sonar 2 lookups for current-information intents."""
+    assert route_text("track Tesla stock").backend == "perplexity"
+    assert route_text("how are the markets today").backend == "perplexity"
+    assert route_text("price of bitcoin").backend == "perplexity"
+    assert route_text("weather in Belgrade").backend == "perplexity"
+    assert route_text("forecast for tomorrow").backend == "perplexity"
+    assert route_text("latest news on Apple").backend == "perplexity"
+    assert route_text("today's headlines").backend == "perplexity"
+    assert route_text("score of the Lakers game").backend == "perplexity"
+
+
+def test_route_text_routes_make_project_intent() -> None:
+    """'make me a project todo-app' should go to the project scaffold tool."""
+    assert route_text("make me a project todo-app").backend == "make_project"
+    assert (
+        route_text("create a new project called sticky-notes").backend
+        == "make_project"
+    )
+    assert (
+        route_text("scaffold a project named hello-world").backend == "make_project"
+    )
+
+
+def test_route_text_routes_browser_intents_to_playwright() -> None:
+    """Explicit browser-automation phrasings hit the Playwright bridge."""
+    assert route_text("log in to https://github.com").backend == "playwright"
+    assert route_text("login to https://music.youtube.com").backend == "playwright"
+    assert route_text("browse to https://news.ycombinator.com").backend == "playwright"
+    assert (
+        route_text("search youtube for don't tread on me by cain").backend
+        == "playwright"
+    )
+    assert route_text("screenshot https://example.com").backend == "playwright"
+
+
+def test_make_project_creates_directory_with_scaffold(tmp_path, monkeypatch) -> None:
+    """make_project should create ~/Projects/<name>/ with README + git init."""
+    fake_projects = tmp_path / "Projects"
+    monkeypatch.setattr(filip_cockpit, "_PROJECTS_ROOT", fake_projects)
+    result = filip_cockpit.make_project("make me a project called todo-demo")
+    assert result.success is True
+    target = fake_projects / "todo-demo"
+    assert target.is_dir()
+    assert (target / "README.md").is_file()
+    assert (target / ".gitignore").is_file()
+
+
+def test_make_project_rejects_bad_names_and_collisions(tmp_path, monkeypatch) -> None:
+    fake_projects = tmp_path / "Projects"
+    monkeypatch.setattr(filip_cockpit, "_PROJECTS_ROOT", fake_projects)
+    # First create succeeds.
+    filip_cockpit.make_project("make me a project called demo-app")
+    # Collision should fail with a clear message.
+    again = filip_cockpit.make_project("make me a project called demo-app")
+    assert again.success is False
+    assert "already exists" in again.content
+    # Empty-name / no-name input should fail without writing.
+    blank = filip_cockpit.make_project("make me a project")
+    assert blank.success is False
+
+
+def test_explicit_backend_addressing_overrides_keyword_collision() -> None:
+    """`ask codex to implement a new todo app` must route to Codex, not Lumo.
+
+    Without the explicit-name shortcut, the Lumo keyword `todo` wins over
+    the Codex keyword `implement` because Lumo's branch is evaluated first.
+    """
+    assert route_text("ask codex to implement a new todo app").backend == "codex"
+    assert route_text("have codex draft a release plan").backend == "codex"
+    assert route_text("ask claude to summarize the diff").backend == "claude"
+    assert route_text("ask lumo to think about architecture").backend == "lumo"
+    assert route_text("ask perplexity about deploying to prod").backend == "perplexity"
+
+
+def test_route_text_routes_deploy_verbs_to_codex() -> None:
+    """Deployment intents should hit Codex (shell execution), not Claude chat."""
+    assert route_text("deploy the cockpit").backend == "codex"
+    assert route_text("ship the fix to staging").backend == "codex"
+    assert route_text("release v1.2 to production").backend == "codex"
+    assert route_text("rollout the migration").backend == "codex"
+    assert route_text("rollback last release").backend == "codex"
+    assert route_text("publish the package").backend == "codex"
+
+
 def test_safe_shell_blocks_destructive_and_secret_paths(tmp_path: Path) -> None:
     tool = SafeShellTool()
     assert tool.execute(command="rm -rf /", repo_path=str(tmp_path)).success is False

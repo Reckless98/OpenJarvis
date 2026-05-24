@@ -189,6 +189,22 @@ The launcher backend only invokes `xdg-open` with URL or path arguments —
 no arbitrary shell. It is listed under "Backend override" in the cockpit
 UI for explicit dispatch.
 
+**Browser fallback.** On minimal desktops where `xdg-open` has no
+registered `www-browser` handler (the common "links2 / lynx / w3m: not
+found" error), the launcher retries `http(s)://` URLs against a known
+browser-binary list — `google-chrome`, `chromium`, `chromium-browser`,
+`brave-browser`, `vivaldi`, `microsoft-edge`, `firefox` — and uses the
+first one that is installed. Non-URL targets (terminal, file manager)
+still go through `xdg-open` only.
+
+**Persona.** `JARVIS_PERSONA` is the system prompt prepended to every
+`claude/chat` call. It encodes the canonical Jarvis register — Edwardian
+butler with a modern technical vocabulary, UK English, short declarative
+sentences that front-load the key fact, percentage/label-first status
+reports, calm restrained warnings, faint dry humour used sparingly, and
+the user addressed as "sir". Refined from on-screen dialogue references
+(MCU Fandom wiki) on 2026-05-24.
+
 **Voice persona.** The frontend now picks a male British TTS voice (Daniel
 UK → Google UK English Male → Microsoft George/Ryan/Thomas → Oliver →
 Arthur → any en-GB → any en), warms the `voiceschanged` event on mount so

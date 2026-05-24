@@ -241,6 +241,53 @@ class TestCockpitRoutes:
         assert captured["args"][0] == "xdg-open"
         assert captured["args"][1].startswith("http")
 
+    def test_cockpit_launcher_falls_back_to_browser_binary(
+        self, monkeypatch, tmp_path
+    ):
+        """When xdg-open finds no www-browser handler, the launcher should
+        retry with a known browser binary (chrome / firefox / etc.)."""
+        import shutil
+        import subprocess
+
+        calls: list[list[str]] = []
+
+        def fake_which(name: str) -> str | None:
+            if name == "xdg-open":
+                return "/usr/bin/xdg-open"
+            if name == "google-chrome":
+                return "/usr/bin/google-chrome"
+            return None
+
+        def fake_run(args, *, cwd, input_text="", timeout=120):
+            calls.append(list(args))
+            if args[0] == "xdg-open":
+                return subprocess.CompletedProcess(
+                    args, 4, stdout="", stderr="xdg-open: no method available"
+                )
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(shutil, "which", fake_which)
+        monkeypatch.setattr(filip_cockpit, "_run_command", fake_run)
+
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "open browser",
+                "repo_path": str(tmp_path),
+                "dry_run": False,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "launcher"
+        assert data["success"] is True
+        assert "Opening browser" in data["result"]
+        # First attempt was xdg-open, second was the chrome fallback.
+        assert calls[0][0] == "xdg-open"
+        assert calls[-1][0] == "google-chrome"
+        assert calls[-1][1].startswith("http")
+
     def test_cockpit_chat_executes_claude_with_persona(self, monkeypatch, tmp_path):
         import shutil
         import subprocess
@@ -273,8 +320,9 @@ class TestCockpitRoutes:
         data = resp.json()
         assert data["backend"] == "claude"
         assert data["success"] is True
-        assert "JARVIS" in str(captured["input"])
-        assert "Sir" in str(captured["input"])
+        prompt = str(captured["input"])
+        assert "Jarvis" in prompt
+        assert "sir" in prompt.lower()
 
     def test_cockpit_run_threads_model_through_claude_override(
         self, monkeypatch, tmp_path

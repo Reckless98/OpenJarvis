@@ -3,7 +3,7 @@ const KEY = 'openjarvis-cockpit-prefs';
 export interface CockpitPrefs {
   defaultBackend: string;
   preferredModel: Record<string, string>;
-  wakeMode: 'off' | 'clap' | 'always';
+  wakeMode: 'off' | 'clap' | 'always' | 'all';
   ttsEnabled: boolean;
 }
 

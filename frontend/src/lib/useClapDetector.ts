@@ -14,7 +14,17 @@ interface ClapDetectorState {
   level: number;
 }
 
-const DEFAULT_THRESHOLD = 0.45;
+// Static absolute floor — we never trigger below this RMS no matter how
+// quiet the room is, so mic hiss / fan hum can't fire a clap.
+const STATIC_FLOOR = 0.06;
+// The dynamic threshold is `max(STATIC_FLOOR, baseline * MULT)`. With
+// MULT=4, the detector fires on any sample 4× louder than the rolling
+// ambient noise floor — adapts to quiet rooms (Lamia2 idle ~0.005) and
+// noisy ones (open mic in a café ~0.05) without retuning.
+const DYNAMIC_MULT = 4;
+// Rolling baseline window in ms. 1.5s smooths out brief loud sounds but
+// stays responsive to a new ambient level (window opening, AC kicking in).
+const BASELINE_WINDOW_MS = 1500;
 const DEFAULT_GAP_MS = 1500;
 const DEFAULT_COOLDOWN_MS = 2500;
 
@@ -24,7 +34,9 @@ const DEFAULT_COOLDOWN_MS = 2500;
  */
 export function useClapDetector(options: ClapDetectorOptions): ClapDetectorState {
   const { enabled, onClap } = options;
-  const threshold = options.threshold ?? DEFAULT_THRESHOLD;
+  // `options.threshold`, if given, overrides the dynamic baseline and acts
+  // as an absolute trigger — escape hatch for power users / tests.
+  const staticOverride = options.threshold;
   const gapMs = options.gapMs ?? DEFAULT_GAP_MS;
   const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
 
@@ -63,6 +75,11 @@ export function useClapDetector(options: ClapDetectorOptions): ClapDetectorState
         const buffer = new Uint8Array(analyser.fftSize);
         setReady(true);
 
+        // Rolling baseline samples (RMS over last BASELINE_WINDOW_MS).
+        // Samples below the static floor feed the baseline; loud samples
+        // (claps) do not, so the baseline tracks ambient noise only.
+        const baselineHistory: Array<{ at: number; rms: number }> = [];
+        let baseline = 0;
         const tick = () => {
           if (cancelled || !analyser) return;
           analyser.getByteTimeDomainData(buffer);
@@ -76,7 +93,27 @@ export function useClapDetector(options: ClapDetectorOptions): ClapDetectorState
 
           const now = performance.now();
           const inCooldown = now - lastFireAt < cooldownMs;
-          if (rms > threshold && armed && !inCooldown) {
+
+          // Feed the baseline only with quiet samples — claps and speech
+          // shouldn't pollute the ambient floor estimate.
+          if (rms < STATIC_FLOOR * 1.5) {
+            baselineHistory.push({ at: now, rms });
+            while (
+              baselineHistory.length > 0
+              && now - baselineHistory[0].at > BASELINE_WINDOW_MS
+            ) {
+              baselineHistory.shift();
+            }
+            if (baselineHistory.length > 0) {
+              const sum = baselineHistory.reduce((a, b) => a + b.rms, 0);
+              baseline = sum / baselineHistory.length;
+            }
+          }
+
+          const dynamicThreshold = staticOverride
+            ?? Math.max(STATIC_FLOOR, baseline * DYNAMIC_MULT);
+
+          if (rms > dynamicThreshold && armed && !inCooldown) {
             if (lastSpikeAt && now - lastSpikeAt <= gapMs) {
               lastFireAt = now;
               lastSpikeAt = 0;
@@ -120,7 +157,7 @@ export function useClapDetector(options: ClapDetectorOptions): ClapDetectorState
       setReady(false);
       setLevel(0);
     };
-  }, [enabled, threshold, gapMs, cooldownMs]);
+  }, [enabled, staticOverride, gapMs, cooldownMs]);
 
   return { ready, error, level };
 }
