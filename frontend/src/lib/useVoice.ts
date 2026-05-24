@@ -21,6 +21,40 @@ function getSpeechRecognition(): (new () => SRInstance) | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
+/**
+ * Pick the best available "Jarvis from Iron Man" voice — male, British,
+ * formal. Falls back through a preference cascade and ultimately returns
+ * `null` (let the browser pick the default voice).
+ *
+ * Voice list loads asynchronously in some browsers; if no voices are
+ * loaded yet, returns null and the next speak() call will get one.
+ */
+function pickJarvisVoice(): SpeechSynthesisVoice | null {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices.length) return null;
+
+  // Highest fidelity first — known male British voices on macOS/Chrome/Edge.
+  const preferred = [
+    /Daniel.*United Kingdom/i,
+    /Daniel/i,
+    /Google UK English Male/i,
+    /Microsoft (George|Ryan|Thomas).*English.*United Kingdom/i,
+    /Oliver/i,
+    /Arthur/i,
+    /en-GB.*Male/i,
+  ];
+  for (const pattern of preferred) {
+    const match = voices.find((v) => pattern.test(`${v.name} ${v.lang}`));
+    if (match) return match;
+  }
+  // Any en-GB voice.
+  const anyGB = voices.find((v) => v.lang?.toLowerCase().startsWith('en-gb'));
+  if (anyGB) return anyGB;
+  // Last resort: any English voice.
+  return voices.find((v) => v.lang?.toLowerCase().startsWith('en')) ?? null;
+}
+
 export interface VoiceController {
   /** SpeechRecognition is available in this browser. */
   sttSupported: boolean;
@@ -242,7 +276,11 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
       if (!ttsEnabled || !ttsSupportedRef.current || !text) return;
       try {
         const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 1.05;
+        const voice = pickJarvisVoice();
+        if (voice) utterance.voice = voice;
+        utterance.lang = voice?.lang ?? 'en-GB';
+        utterance.rate = 0.96;
+        utterance.pitch = 0.9;
         utterance.onstart = () => setSpeaking(true);
         utterance.onend = () => setSpeaking(false);
         utterance.onerror = () => setSpeaking(false);
@@ -257,6 +295,17 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
   );
 
   useEffect(() => () => stopListening(), [stopListening]);
+
+  // Chrome populates voices asynchronously; nudge once on mount so the
+  // first speak() reliably picks the Jarvis voice instead of the default.
+  useEffect(() => {
+    if (!ttsSupportedRef.current) return;
+    const synth = window.speechSynthesis;
+    synth.getVoices();
+    const handler = () => synth.getVoices();
+    synth.addEventListener?.('voiceschanged', handler);
+    return () => synth.removeEventListener?.('voiceschanged', handler);
+  }, []);
 
   return {
     sttSupported: sttSupportedRef.current,

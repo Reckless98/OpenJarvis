@@ -164,3 +164,42 @@ Perplexity/.aria/safe-shell backends.
 - **Next step:** Phase 3 — voice/clap wake on `/filip-cockpit` (browser
   `SpeechRecognition` + `AudioContext` RMS, toggle off by default, no API
   keys, no server-side audio).
+
+## Jarvis persona + launcher + boot riff (Phase 3.2)
+
+Free-form prompts now route to a `claude -p` conversational reply with a
+Jarvis system prompt (UK English, dry, concise, addresses the user as
+"Sir") instead of falling back to the safe-shell debug ping. The literal
+strings `hello`, `ping`, `test`, and the empty string still hit the
+safe-shell ping for routing diagnostics.
+
+The new **launcher** backend handles `open ...`, `launch ...`, `play ...`,
+and `start ...` intents through a small allowlist on top of `xdg-open`:
+
+| Phrase                                | Target                              |
+| ------------------------------------- | ----------------------------------- |
+| `open browser` / `open firefox`       | `xdg-open https://www.google.com`   |
+| `open files` / `open home folder`     | `xdg-open ~`                        |
+| `open terminal`                       | `x-terminal-emulator`               |
+| `open vscode` / `open code`           | `xdg-open vscode://`                |
+| `open github` / `spotify` / `youtube` | matching public URL                 |
+| `play <song>` (no allowlist match)    | `xdg-open https://music.youtube.com/search?q=<song>` |
+
+The launcher backend only invokes `xdg-open` with URL or path arguments —
+no arbitrary shell. It is listed under "Backend override" in the cockpit
+UI for explicit dispatch.
+
+**Voice persona.** The frontend now picks a male British TTS voice (Daniel
+UK → Google UK English Male → Microsoft George/Ryan/Thomas → Oliver →
+Arthur → any en-GB → any en), warms the `voiceschanged` event on mount so
+Chrome's async voice list is ready for the first reply, and speaks at a
+slightly slower rate / lower pitch for the Jarvis cadence.
+
+**Boot Jarvis.** A new "Boot Jarvis" button on `/filip-cockpit` plays a
+five-second synthesized riff (D / G / A power chords through a lowpass) and
+then speaks "Welcome home, Sir. Jarvis online and at your service." No
+audio files are bundled.
+
+Quick actions exercise the new routes without a mic: "Good morning"
+(claude/chat persona reply), "Open browser" (launcher), "Play music"
+(launcher with the YouTube Music fallback).

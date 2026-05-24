@@ -103,6 +103,36 @@ BACKEND_MODELS: dict[str, list[str]] = {
     "perplexity": [""],
     "aria": [""],
     "safe_shell": [""],
+    "launcher": [""],
+}
+
+
+JARVIS_PERSONA = (
+    "You are JARVIS, the AI assistant from Iron Man. "
+    "Address the user as 'Sir' throughout. Be concise, dry, witty, "
+    "and unfailingly polite. Use UK English. One short paragraph max for "
+    "casual exchanges. Never mention being a large language model. When "
+    "you cannot do something, say so plainly and suggest the next step."
+)
+
+
+LAUNCHER_TARGETS: dict[str, list[str]] = {
+    "browser": ["xdg-open", "https://www.google.com"],
+    "firefox": ["xdg-open", "https://www.google.com"],
+    "chrome": ["xdg-open", "https://www.google.com"],
+    "files": ["xdg-open", str(Path.home())],
+    "file manager": ["xdg-open", str(Path.home())],
+    "home folder": ["xdg-open", str(Path.home())],
+    "terminal": ["x-terminal-emulator"],
+    "vscode": ["xdg-open", "vscode://"],
+    "code": ["xdg-open", "vscode://"],
+    "github": ["xdg-open", "https://github.com/"],
+    "spotify": ["xdg-open", "https://open.spotify.com/"],
+    "music": ["xdg-open", "https://open.spotify.com/"],
+    "youtube": ["xdg-open", "https://www.youtube.com/"],
+    "perplexity": ["xdg-open", "https://www.perplexity.ai/"],
+    "claude": ["xdg-open", "https://claude.ai/"],
+    "chatgpt": ["xdg-open", "https://chatgpt.com/"],
 }
 
 
@@ -165,12 +195,32 @@ def backend_status() -> dict[str, dict[str, Any]]:
             "models": BACKEND_MODELS["safe_shell"],
             "uses": "small read-only allowlist (git status, df, free, ...)",
         },
+        "launcher": {
+            "label": "App launcher",
+            "available": bool(shutil.which("xdg-open")),
+            "path": shutil.which("xdg-open") or "",
+            "models": BACKEND_MODELS["launcher"],
+            "uses": "xdg-open with a fixed allowlist (browser, files, music, ...)",
+        },
     }
 
 
 def route_text(text: str) -> RouteDecision:
     """Choose the safest low-cost backend for a user request."""
-    lowered = text.lower()
+    lowered = text.lower().strip()
+    # Explicit debug ping — keep the historical safe_shell/hello behavior so
+    # the router can be exercised without spending CLI tokens.
+    if lowered in {"hello", "ping", "test", ""}:
+        return RouteDecision("safe_shell", "router ping / debug", "hello")
+    # Launcher intent — "open X" / "launch X" / "play X" maps to xdg-open
+    # against a fixed allowlist (see LAUNCHER_TARGETS).
+    if (
+        lowered.startswith("open ")
+        or lowered.startswith("launch ")
+        or lowered.startswith("play ")
+        or lowered.startswith("start ")
+    ):
+        return RouteDecision("launcher", "app/url launch requested", "launch")
     if any(
         word in lowered
         for word in (
@@ -235,7 +285,10 @@ def route_text(text: str) -> RouteDecision:
         )
     ):
         return RouteDecision("safe_shell", "local read-only status requested", "status")
-    return RouteDecision("safe_shell", "default low-cost text route", "hello")
+    # Conversational fallback — anything else is a Jarvis chat turn handled by
+    # Claude (CLI session, no API key). The `chat` action tells execute_route
+    # to dispatch to jarvis_chat() rather than the structured reviewer path.
+    return RouteDecision("claude", "conversational request — Jarvis persona", "chat")
 
 
 def execute_route(
@@ -279,7 +332,12 @@ def execute_route(
     if decision.backend == "codex":
         result = codex_delegate(text, repo, model=model)
     elif decision.backend == "claude":
-        result = claude_review(text, repo, model=model)
+        if decision.action == "chat":
+            result = jarvis_chat(text, repo, model=model)
+        else:
+            result = claude_review(text, repo, model=model)
+    elif decision.backend == "launcher":
+        result = launcher(text)
     elif decision.backend == "lumo":
         result = lumo_offload("summarize", text, None, repo)
     elif decision.backend == "perplexity":
@@ -399,6 +457,91 @@ def claude_review(
         timeout=300,
     )
     return _tool_result("claude_adapter", result)
+
+
+def jarvis_chat(
+    text: str,
+    repo: Path | None = None,
+    *,
+    model: str | None = None,
+) -> ToolResult:
+    """Conversational Jarvis turn — Claude CLI in persona mode.
+
+    Unlike claude_review, this path keeps the response short and addresses
+    the user as "Sir" so TTS feels Tony Stark's Jarvis, not a code reviewer.
+    """
+    repo = _resolve_repo(str(repo) if repo else None)
+    claude = shutil.which("claude")
+    if not claude:
+        return _missing("claude_adapter", "claude")
+    prompt = "\n".join(
+        [
+            JARVIS_PERSONA,
+            "",
+            f"Sir's request: {_truncate(redact(text), 2_000)}",
+        ]
+    )
+    args = [
+        claude,
+        "-p",
+        "--permission-mode",
+        "plan",
+        "--tools",
+        "",
+    ]
+    if model:
+        args.extend(["--model", model])
+    result = _run_command(
+        args,
+        cwd=repo,
+        input_text=prompt,
+        timeout=120,
+    )
+    return _tool_result("claude_adapter", result)
+
+
+def launcher(text: str) -> ToolResult:
+    """Open a known app or URL via xdg-open against a fixed allowlist."""
+    lowered = text.lower().strip()
+    for prefix in ("open ", "launch ", "play ", "start "):
+        if lowered.startswith(prefix):
+            target_name = lowered[len(prefix) :].strip()
+            break
+    else:
+        return ToolResult("launcher", "No launcher verb recognized.", success=False)
+    if not target_name:
+        return ToolResult("launcher", "No target specified.", success=False)
+    args = LAUNCHER_TARGETS.get(target_name)
+    if not args and lowered.startswith("play "):
+        # "play <song>" → YouTube music search URL (xdg-open URL is safe).
+        query = target_name.replace(" ", "+")
+        args = ["xdg-open", f"https://music.youtube.com/search?q={query}"]
+    if not args:
+        return ToolResult(
+            "launcher",
+            f"'{target_name}' is not in the launcher allowlist. "
+            f"Allowed: {', '.join(sorted(LAUNCHER_TARGETS))}.",
+            success=False,
+        )
+    if not shutil.which(args[0]):
+        return ToolResult(
+            "launcher",
+            f"{args[0]} is not installed; cannot launch '{target_name}'.",
+            success=False,
+        )
+    result = _run_command(args, cwd=None, timeout=10)
+    if result.returncode == 0:
+        return ToolResult(
+            "launcher",
+            f"Launched {target_name} (sir).",
+            success=True,
+        )
+    detail = result.stderr.strip() or f"exit {result.returncode}"
+    return ToolResult(
+        "launcher",
+        f"Launcher failed for '{target_name}': {detail}",
+        success=False,
+    )
 
 
 def lumo_offload(
@@ -575,14 +718,15 @@ def _safe_file_path(file_path: str, repo: Path) -> Path | None:
 def _run_command(
     args: list[str],
     *,
-    cwd: Path,
+    cwd: Path | None,
     input_text: str = "",
     timeout: int = DEFAULT_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
     env = {key: value for key in SAFE_ENV_KEYS if (value := os.environ.get(key))}
+    resolved_cwd = cwd if (cwd is not None and cwd.exists()) else None
     return subprocess.run(
         args,
-        cwd=cwd if cwd.exists() else None,
+        cwd=resolved_cwd,
         input=input_text,
         text=True,
         capture_output=True,
@@ -928,12 +1072,16 @@ __all__ = [
     "LumoAdapterTool",
     "PerplexityAdapterTool",
     "SafeShellTool",
+    "JARVIS_PERSONA",
+    "LAUNCHER_TARGETS",
     "aria_handoff",
     "backend_status",
     "claude_review",
     "codex_delegate",
     "detect_tools",
     "execute_route",
+    "jarvis_chat",
+    "launcher",
     "lumo_offload",
     "perplexity_search",
     "route_text",

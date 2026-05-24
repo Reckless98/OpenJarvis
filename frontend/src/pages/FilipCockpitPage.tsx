@@ -24,16 +24,18 @@ import {
 } from '../lib/cockpitPrefs';
 import { useClapDetector } from '../lib/useClapDetector';
 import { useVoice } from '../lib/useVoice';
-import { playWakeCue } from '../lib/wakeSounds';
+import { bootRiff, playWakeCue } from '../lib/wakeSounds';
 
 const QUICK_ACTIONS = [
-  { label: 'Hello', command: 'hello' },
+  { label: 'Hello (ping)', command: 'hello' },
+  { label: 'Good morning', command: 'good morning' },
   { label: 'Repo status', command: 'show repo status' },
+  { label: 'Open browser', command: 'open browser' },
+  { label: 'Play music', command: 'open music' },
   { label: 'Claude review', command: 'ask Claude to review diff' },
   { label: 'Codex next step', command: 'ask Codex to inspect next step' },
   { label: 'Lumo commit', command: 'ask Lumo to draft commit message' },
   { label: 'Latest docs', command: 'search latest docs' },
-  { label: 'Current state', command: 'read current state' },
 ];
 
 const TOOL_LABELS: Record<string, string> = {
@@ -203,6 +205,18 @@ export function FilipCockpitPage() {
         ? 'listening'
         : 'idle';
   const jarvisLevel = voice.listening ? 0.75 : Math.min(1, clap.level * 2.2);
+
+  const bootJarvis = async () => {
+    setStatusLine('Booting Jarvis…');
+    await bootRiff();
+    // Speak after a beat so the riff doesn't fight the TTS.
+    window.setTimeout(() => {
+      if (prefs.ttsEnabled) {
+        voice.speak('Welcome home, Sir. Jarvis online and at your service.');
+      }
+      setStatusLine('Jarvis online — at your service, Sir.');
+    }, 1200);
+  };
 
   const pushToTalk = async () => {
     if (!voice.sttSupported) {
@@ -505,6 +519,19 @@ export function FilipCockpitPage() {
             >
               <Ear size={14} />
               Wake
+            </button>
+            <button
+              onClick={() => void bootJarvis()}
+              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium"
+              style={{
+                background: 'color-mix(in srgb, var(--color-accent) 20%, transparent)',
+                color: 'var(--color-text)',
+                border: '1px solid var(--color-accent)',
+              }}
+              title="Play the Tony Stark boot riff and greeting"
+            >
+              <Sparkles size={14} />
+              Boot Jarvis
             </button>
           </div>
         </section>

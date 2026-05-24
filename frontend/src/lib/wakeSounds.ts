@@ -117,3 +117,65 @@ export async function playWakeCue(): Promise<void> {
 }
 
 export const __testing = { SYNTH_CUES };
+
+/**
+ * Tony Stark boot riff — opening of "Should I Stay or Should I Go" by The
+ * Clash, synthesized live with three power chords (D / G / A) on a square
+ * wave through a lowpass. About 5.5 seconds, fully offline, no copyrighted
+ * audio.
+ */
+export async function bootRiff(): Promise<void> {
+  try {
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new Ctx();
+    const master = ctx.createGain();
+    master.gain.value = 0.18;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1800;
+    filter.connect(master);
+    master.connect(ctx.destination);
+
+    // D5 power chord, G5, A5 — root + fifth + octave (rough power-chord stack)
+    const D: [number, number, number] = [146.83, 220, 293.66];
+    const G: [number, number, number] = [196.0, 293.66, 392.0];
+    const A: [number, number, number] = [110.0, 164.81, 220.0];
+
+    // Riff: D D D D | G G | D | G | A A | D
+    // strum times in seconds, chord per strum
+    const strums: Array<{ at: number; chord: [number, number, number]; dur: number }> = [
+      { at: 0.0, chord: D, dur: 0.35 },
+      { at: 0.35, chord: D, dur: 0.35 },
+      { at: 0.7, chord: D, dur: 0.35 },
+      { at: 1.05, chord: D, dur: 0.5 },
+      { at: 1.6, chord: G, dur: 0.35 },
+      { at: 1.95, chord: G, dur: 0.5 },
+      { at: 2.5, chord: D, dur: 0.5 },
+      { at: 3.05, chord: G, dur: 0.5 },
+      { at: 3.6, chord: A, dur: 0.35 },
+      { at: 3.95, chord: A, dur: 0.4 },
+      { at: 4.4, chord: D, dur: 1.0 },
+    ];
+    const t0 = ctx.currentTime + 0.05;
+    for (const s of strums) {
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.001, t0 + s.at);
+      g.gain.exponentialRampToValueAtTime(0.6, t0 + s.at + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + s.at + s.dur);
+      g.connect(filter);
+      for (const f of s.chord) {
+        const osc = ctx.createOscillator();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(f, t0 + s.at);
+        osc.connect(g);
+        osc.start(t0 + s.at);
+        osc.stop(t0 + s.at + s.dur + 0.05);
+      }
+    }
+    window.setTimeout(() => ctx.close().catch(() => {}), 6500);
+  } catch {
+    /* ignore — boot riff is non-critical */
+  }
+}

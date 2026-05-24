@@ -168,6 +168,114 @@ class TestCockpitRoutes:
         )
         assert resp.status_code == 400
 
+    def test_cockpit_routes_free_form_to_claude_chat(self, tmp_path):
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "what time is it sir",
+                "repo_path": str(tmp_path),
+                "dry_run": True,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "claude"
+        assert data["action"] == "chat"
+
+    def test_cockpit_ping_still_routes_to_safe_shell(self, tmp_path):
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={"command": "hello", "repo_path": str(tmp_path), "dry_run": True},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "safe_shell"
+        assert data["action"] == "hello"
+
+    def test_cockpit_open_intent_routes_to_launcher(self, tmp_path):
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "open firefox",
+                "repo_path": str(tmp_path),
+                "dry_run": True,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "launcher"
+        assert data["action"] == "launch"
+
+    def test_cockpit_launcher_executes_xdg_open(self, monkeypatch, tmp_path):
+        import shutil
+        import subprocess
+
+        captured: dict[str, list[str]] = {}
+
+        def fake_which(name: str) -> str | None:
+            return "/usr/bin/xdg-open" if name == "xdg-open" else None
+
+        def fake_run(args, *, cwd, input_text="", timeout=120):
+            captured["args"] = list(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(shutil, "which", fake_which)
+        monkeypatch.setattr(filip_cockpit, "_run_command", fake_run)
+
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "open browser",
+                "repo_path": str(tmp_path),
+                "dry_run": False,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "launcher"
+        assert data["success"] is True
+        assert captured["args"][0] == "xdg-open"
+        assert captured["args"][1].startswith("http")
+
+    def test_cockpit_chat_executes_claude_with_persona(self, monkeypatch, tmp_path):
+        import shutil
+        import subprocess
+
+        captured: dict[str, list[str] | str] = {}
+
+        def fake_which(name: str) -> str | None:
+            return "/usr/local/bin/claude" if name == "claude" else None
+
+        def fake_run(args, *, cwd, input_text="", timeout=120):
+            captured["args"] = list(args)
+            captured["input"] = input_text
+            return subprocess.CompletedProcess(
+                args, 0, stdout="At your service, Sir.", stderr=""
+            )
+
+        monkeypatch.setattr(shutil, "which", fake_which)
+        monkeypatch.setattr(filip_cockpit, "_run_command", fake_run)
+
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "good morning",
+                "repo_path": str(tmp_path),
+                "dry_run": False,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "claude"
+        assert data["success"] is True
+        assert "JARVIS" in str(captured["input"])
+        assert "Sir" in str(captured["input"])
+
     def test_cockpit_run_threads_model_through_claude_override(
         self, monkeypatch, tmp_path
     ):
