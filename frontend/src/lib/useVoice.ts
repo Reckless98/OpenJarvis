@@ -21,6 +21,12 @@ function getSpeechRecognition(): (new () => SRInstance) | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
+// Known female TTS voice names across macOS, Chrome, Edge, Linux espeak/festival.
+// We deny-list these so the cascade never lands on a female voice when *any*
+// male voice — even a non-British one — is available. Jarvis is male.
+const FEMALE_VOICE_DENY = /(female|woman|samantha|karen|moira|tessa|fiona|veena|victoria|allison|kate|serena|susan|fiona|amelie|amélie|google uk english female|google us english.+female|google english female|zira|hazel|catherine|linda|heather|jenny|aria|nova|emma|amy|joanna|kendra|kimberly|salli|ivy|kira|alva|ellen|laura|petra)/i;
+const MALE_VOICE_HINT = /(male|man|daniel|oliver|arthur|george|ryan|thomas|brian|alex|fred|aaron|reed|mark|rocko|tom|joe|harry|gordon|david|james|matthew|jeremy|jorge|diego)/i;
+
 /**
  * Pick the best available "Jarvis from Iron Man" voice — male, British,
  * formal. Falls back through a preference cascade and ultimately returns
@@ -31,8 +37,11 @@ function getSpeechRecognition(): (new () => SRInstance) | null {
  */
 function pickJarvisVoice(): SpeechSynthesisVoice | null {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
-  const voices = window.speechSynthesis.getVoices();
-  if (!voices.length) return null;
+  const allVoices = window.speechSynthesis.getVoices();
+  if (!allVoices.length) return null;
+
+  // Filter female voices out up front — never speak Jarvis as a woman.
+  const voices = allVoices.filter((v) => !FEMALE_VOICE_DENY.test(`${v.name} ${v.voiceURI ?? ''}`));
 
   // Highest fidelity first — known male British voices on macOS/Chrome/Edge.
   const preferred = [
@@ -48,11 +57,24 @@ function pickJarvisVoice(): SpeechSynthesisVoice | null {
     const match = voices.find((v) => pattern.test(`${v.name} ${v.lang}`));
     if (match) return match;
   }
-  // Any en-GB voice.
+  // Any explicitly-male en-GB voice.
+  const maleGB = voices.find(
+    (v) => v.lang?.toLowerCase().startsWith('en-gb') && MALE_VOICE_HINT.test(v.name),
+  );
+  if (maleGB) return maleGB;
+  // Any en-GB voice that's not on the female denylist.
   const anyGB = voices.find((v) => v.lang?.toLowerCase().startsWith('en-gb'));
   if (anyGB) return anyGB;
-  // Last resort: any English voice.
-  return voices.find((v) => v.lang?.toLowerCase().startsWith('en')) ?? null;
+  // Any explicitly-male English voice.
+  const maleEN = voices.find(
+    (v) => v.lang?.toLowerCase().startsWith('en') && MALE_VOICE_HINT.test(v.name),
+  );
+  if (maleEN) return maleEN;
+  // Any English voice not on the female denylist.
+  const anyEN = voices.find((v) => v.lang?.toLowerCase().startsWith('en'));
+  if (anyEN) return anyEN;
+  // Last resort: a non-female voice in any language is still better than a female Jarvis.
+  return voices[0] ?? null;
 }
 
 export interface VoiceController {

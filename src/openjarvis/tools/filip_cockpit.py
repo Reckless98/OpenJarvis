@@ -127,8 +127,8 @@ LAUNCHER_TARGETS: dict[str, list[str]] = {
     "vscode": ["xdg-open", "vscode://"],
     "code": ["xdg-open", "vscode://"],
     "github": ["xdg-open", "https://github.com/"],
-    "spotify": ["xdg-open", "https://open.spotify.com/"],
-    "music": ["xdg-open", "https://open.spotify.com/"],
+    "music": ["xdg-open", "https://music.youtube.com/"],
+    "youtube music": ["xdg-open", "https://music.youtube.com/"],
     "youtube": ["xdg-open", "https://www.youtube.com/"],
     "perplexity": ["xdg-open", "https://www.perplexity.ai/"],
     "claude": ["xdg-open", "https://claude.ai/"],
@@ -512,10 +512,15 @@ def launcher(text: str) -> ToolResult:
     if not target_name:
         return ToolResult("launcher", "No target specified.", success=False)
     args = LAUNCHER_TARGETS.get(target_name)
+    spoken_target = target_name
     if not args and lowered.startswith("play "):
-        # "play <song>" → YouTube music search URL (xdg-open URL is safe).
-        query = target_name.replace(" ", "+")
+        # "play <song>" → YouTube Music search URL (xdg-open URL is safe).
+        # urllib.parse.quote keeps + as a safe separator for music.youtube.
+        from urllib.parse import quote_plus
+
+        query = quote_plus(target_name)
         args = ["xdg-open", f"https://music.youtube.com/search?q={query}"]
+        spoken_target = f"{target_name} on YouTube Music"
     if not args:
         return ToolResult(
             "launcher",
@@ -533,7 +538,7 @@ def launcher(text: str) -> ToolResult:
     if result.returncode == 0:
         return ToolResult(
             "launcher",
-            f"Launched {target_name} (sir).",
+            f"Opening {spoken_target}, sir.",
             success=True,
         )
     detail = result.stderr.strip() or f"exit {result.returncode}"

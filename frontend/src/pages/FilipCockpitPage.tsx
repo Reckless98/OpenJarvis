@@ -31,7 +31,7 @@ const QUICK_ACTIONS = [
   { label: 'Good morning', command: 'good morning' },
   { label: 'Repo status', command: 'show repo status' },
   { label: 'Open browser', command: 'open browser' },
-  { label: 'Play music', command: 'open music' },
+  { label: 'YouTube Music', command: 'open music' },
   { label: 'Claude review', command: 'ask Claude to review diff' },
   { label: 'Codex next step', command: 'ask Codex to inspect next step' },
   { label: 'Lumo commit', command: 'ask Lumo to draft commit message' },
@@ -56,6 +56,52 @@ function missingTools(result: CockpitRunResponse | null): string[] {
   return Object.entries(TOOL_LABELS)
     .filter(([key]) => !result.available[key])
     .map(([, label]) => label);
+}
+
+const BACKEND_SPOKEN: Record<string, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  lumo: 'Lumo',
+  perplexity: 'Perplexity',
+  aria: 'Aria',
+  safe_shell: 'a safe shell command',
+  launcher: 'the app launcher',
+};
+
+/**
+ * Turn a cockpit response into a one-line spoken sentence Jarvis-style.
+ * - Dry-run JSON dump → "Routed to <backend>, sir."
+ * - Safe shell multi-line output (e.g. git status) → a short ack with a count,
+ *   not a line-by-line read-aloud.
+ * - Claude/launcher/lumo natural prose → spoken directly (truncated).
+ */
+function speakableResult(response: CockpitRunResponse): string {
+  const raw = (response.result ?? '').trim();
+  if (!raw) {
+    const backendName = BACKEND_SPOKEN[response.backend] ?? response.backend;
+    return `Done with ${backendName}, sir.`;
+  }
+  const looksLikeJson = raw.startsWith('{') || raw.startsWith('[');
+  if (looksLikeJson) {
+    const backendName = BACKEND_SPOKEN[response.backend] ?? response.backend;
+    const tail = response.model ? ` using ${response.model}` : '';
+    return `Routed to ${backendName}${tail}, sir.`;
+  }
+  if (response.backend === 'safe_shell') {
+    // Git/status output is multi-line; one-line summary instead of read-aloud.
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    if (response.action === 'status' && lines.length > 0) {
+      // First line is usually "## <branch>"; the rest are change entries.
+      const head = lines[0].replace(/^##\s*/, '');
+      const changes = Math.max(0, lines.length - 1);
+      if (changes === 0) return `Repo on ${head} is clean, sir.`;
+      const noun = changes === 1 ? 'change' : 'changes';
+      return `Repo on ${head} has ${changes} ${noun}, sir.`;
+    }
+    return `Shell command completed, sir.`;
+  }
+  // Claude chat reply, launcher confirmation, lumo summary — speak directly.
+  return raw.slice(0, 480);
 }
 
 export function FilipCockpitPage() {
@@ -127,7 +173,7 @@ export function FilipCockpitPage() {
           : `Failed on ${response.backend}`,
       );
       if (prefs.ttsEnabled && response.success) {
-        voice.speak(response.result.slice(0, 480));
+        voice.speak(speakableResult(response));
       }
     } catch (exc) {
       setResult(null);
@@ -208,14 +254,12 @@ export function FilipCockpitPage() {
 
   const bootJarvis = async () => {
     setStatusLine('Booting Jarvis…');
-    await bootRiff();
-    // Speak after a beat so the riff doesn't fight the TTS.
-    window.setTimeout(() => {
-      if (prefs.ttsEnabled) {
-        voice.speak('Welcome home, Sir. Jarvis online and at your service.');
-      }
-      setStatusLine('Jarvis online — at your service, Sir.');
-    }, 1200);
+    // Riff plays dimmed in the background for ~25s; Jarvis speaks overlaid.
+    await bootRiff({ volume: 0.35, maxDurationMs: 25_000, fadeMs: 1500 });
+    if (prefs.ttsEnabled) {
+      voice.speak('Welcome home, Sir. Jarvis online and at your service.');
+    }
+    setStatusLine('Jarvis online — at your service, Sir.');
   };
 
   const pushToTalk = async () => {

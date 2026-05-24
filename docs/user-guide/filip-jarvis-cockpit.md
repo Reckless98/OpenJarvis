@@ -196,9 +196,31 @@ Chrome's async voice list is ready for the first reply, and speaks at a
 slightly slower rate / lower pitch for the Jarvis cadence.
 
 **Boot Jarvis.** A new "Boot Jarvis" button on `/filip-cockpit` plays a
-five-second synthesized riff (D / G / A power chords through a lowpass) and
-then speaks "Welcome home, Sir. Jarvis online and at your service." No
-audio files are bundled.
+~5-second riff and then speaks "Welcome home, Sir. Jarvis online and at
+your service."
+
+- If you drop your own MP3 at `frontend/public/boot.mp3` (e.g. the
+  opening of *Should I Stay or Should I Go* by The Clash — you supply the
+  file, we do not bundle copyrighted audio), the button plays that.
+- Otherwise it synthesizes a recognizable approximation with detuned
+  square-wave power chords (D / G-F / D pattern, ~113 BPM) through a
+  lowpass — fully offline, no network.
+
+**Voice picker.** The TTS voice cascade now explicitly **denies** known
+female voice names (Samantha, Karen, Moira, Tessa, Fiona, Veena,
+Victoria, Zira, Hazel, Heather, Aria, Nova, etc.) before preferring male
+voices in order: Daniel UK → Google UK English Male → Microsoft
+George/Ryan/Thomas → Oliver → Arthur → any explicitly-male en-GB → any
+en-GB → any explicitly-male en → any en. If your OS only ships female
+voices, install a male UK voice (Linux: `speech-dispatcher` +
+`mbrola-en1`; macOS: Settings → Accessibility → Spoken Content → System
+Voice → Daniel; Windows: Settings → Time & Language → Speech → add UK
+English).
+
+**Spoken result.** In dry-run mode, the cockpit summarizes the routing
+decision aloud ("Routed to Claude, sir.") instead of speaking the raw
+JSON. In live mode the backend's natural-language reply
+(claude/launcher/safe_shell) is spoken directly.
 
 Quick actions exercise the new routes without a mic: "Good morning"
 (claude/chat persona reply), "Open browser" (launcher), "Play music"

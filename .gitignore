@@ -64,6 +64,13 @@ site/
 # Frontend
 frontend/node_modules/
 frontend/dist/
+# User-supplied wake/boot audio — never commit copyrighted audio.
+frontend/public/boot.mp3
+frontend/public/wake.mp3
+frontend/public/wake-*.mp3
+# Playwright MCP scratch + local cockpit screenshots
+.playwright-mcp/
+cockpit-jarvis.png
 
 # Desktop
 desktop/node_modules/

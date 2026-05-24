@@ -118,64 +118,159 @@ export async function playWakeCue(): Promise<void> {
 
 export const __testing = { SYNTH_CUES };
 
+export interface BootRiffOptions {
+  /** Peak playback volume (0..1). Use ~0.3 to play dimmed behind TTS. */
+  volume?: number;
+  /** Stop and fade the riff after this many ms. Defaults to 25000 (25s). */
+  maxDurationMs?: number;
+  /** Fade-out duration in ms. Defaults to 1500. */
+  fadeMs?: number;
+}
+
 /**
  * Tony Stark boot riff — opening of "Should I Stay or Should I Go" by The
- * Clash, synthesized live with three power chords (D / G / A) on a square
- * wave through a lowpass. About 5.5 seconds, fully offline, no copyrighted
- * audio.
+ * Clash.
+ *
+ * If the user drops `/boot.mp3` in `frontend/public/` we play that (real
+ * recording — they supply it themselves; we cannot bundle the copyrighted
+ * track). Otherwise we synthesize a recognizable approximation of the
+ * iconic D / G-F / D intro pattern with detuned square waves through a
+ * lowpass.
+ *
+ * Returns a `stop()` function so the caller can cut the riff early. The
+ * riff also auto-fades + stops after `maxDurationMs`.
  */
-export async function bootRiff(): Promise<void> {
+export async function bootRiff(opts: BootRiffOptions = {}): Promise<() => void> {
+  const volume = opts.volume ?? 0.9;
+  const maxDurationMs = opts.maxDurationMs ?? 25_000;
+  const fadeMs = opts.fadeMs ?? 1500;
+
+  // Prefer the real recording if the user dropped one in /public.
+  try {
+    const audio = new Audio('/boot.mp3');
+    audio.volume = volume;
+    await audio.play();
+
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      const start = audio.volume;
+      const steps = Math.max(1, Math.floor(fadeMs / 50));
+      let i = 0;
+      const fade = window.setInterval(() => {
+        i++;
+        audio.volume = Math.max(0, start * (1 - i / steps));
+        if (i >= steps) {
+          window.clearInterval(fade);
+          audio.pause();
+        }
+      }, 50);
+    };
+    window.setTimeout(stop, maxDurationMs);
+    return stop;
+  } catch {
+    /* fall through to synth */
+  }
+
   try {
     const Ctx =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     const ctx = new Ctx();
     const master = ctx.createGain();
-    master.gain.value = 0.18;
+    // Scale synth volume by the requested volume (default keeps prior behavior).
+    const targetGain = 0.22 * (volume / 0.9);
+    master.gain.value = targetGain;
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 1800;
+    filter.frequency.value = 2200;
+    filter.Q.value = 0.5;
     filter.connect(master);
     master.connect(ctx.destination);
 
-    // D5 power chord, G5, A5 — root + fifth + octave (rough power-chord stack)
-    const D: [number, number, number] = [146.83, 220, 293.66];
+    // Power-chord stacks: root + fifth + octave with a slightly detuned
+    // higher octave to fatten the guitar tone.
+    // The intro riff in "Should I Stay or Should I Go" is essentially:
+    //   D D D D | G F | D D | F G | D
+    // played as chord stabs. Tempo ~113 BPM (~530 ms/beat); we use ~310 ms
+    // for stab strums and longer holds on the resolves.
+    const D: [number, number, number] = [146.83, 220.0, 293.66];
     const G: [number, number, number] = [196.0, 293.66, 392.0];
-    const A: [number, number, number] = [110.0, 164.81, 220.0];
+    const F: [number, number, number] = [174.61, 261.63, 349.23];
 
-    // Riff: D D D D | G G | D | G | A A | D
-    // strum times in seconds, chord per strum
-    const strums: Array<{ at: number; chord: [number, number, number]; dur: number }> = [
-      { at: 0.0, chord: D, dur: 0.35 },
-      { at: 0.35, chord: D, dur: 0.35 },
-      { at: 0.7, chord: D, dur: 0.35 },
-      { at: 1.05, chord: D, dur: 0.5 },
-      { at: 1.6, chord: G, dur: 0.35 },
-      { at: 1.95, chord: G, dur: 0.5 },
-      { at: 2.5, chord: D, dur: 0.5 },
-      { at: 3.05, chord: G, dur: 0.5 },
-      { at: 3.6, chord: A, dur: 0.35 },
-      { at: 3.95, chord: A, dur: 0.4 },
-      { at: 4.4, chord: D, dur: 1.0 },
+    const strums: Array<{ at: number; chord: [number, number, number]; dur: number; peak: number }> = [
+      // Opening: four D stabs (Mick Jones's iconic intro).
+      { at: 0.0, chord: D, dur: 0.28, peak: 0.7 },
+      { at: 0.31, chord: D, dur: 0.28, peak: 0.7 },
+      { at: 0.62, chord: D, dur: 0.28, peak: 0.7 },
+      { at: 0.93, chord: D, dur: 0.45, peak: 0.75 },
+      // Tension: G then F (the "Should I stay…" descent).
+      { at: 1.55, chord: G, dur: 0.32, peak: 0.7 },
+      { at: 1.95, chord: F, dur: 0.45, peak: 0.7 },
+      // Resolve back to D.
+      { at: 2.55, chord: D, dur: 0.32, peak: 0.7 },
+      { at: 2.95, chord: D, dur: 0.45, peak: 0.75 },
+      // Second tension: F → G.
+      { at: 3.6, chord: F, dur: 0.32, peak: 0.7 },
+      { at: 3.95, chord: G, dur: 0.32, peak: 0.7 },
+      // Big closing D, held.
+      { at: 4.4, chord: D, dur: 1.2, peak: 0.85 },
     ];
+
     const t0 = ctx.currentTime + 0.05;
     for (const s of strums) {
       const g = ctx.createGain();
       g.gain.setValueAtTime(0.001, t0 + s.at);
-      g.gain.exponentialRampToValueAtTime(0.6, t0 + s.at + 0.015);
+      // Sharper attack for that chord-stab "thwack".
+      g.gain.exponentialRampToValueAtTime(s.peak, t0 + s.at + 0.012);
       g.gain.exponentialRampToValueAtTime(0.001, t0 + s.at + s.dur);
       g.connect(filter);
-      for (const f of s.chord) {
+      // Three oscillators per chord, plus one slightly detuned for fatness.
+      for (let i = 0; i < s.chord.length; i++) {
+        const f = s.chord[i];
         const osc = ctx.createOscillator();
         osc.type = 'square';
         osc.frequency.setValueAtTime(f, t0 + s.at);
         osc.connect(g);
         osc.start(t0 + s.at);
         osc.stop(t0 + s.at + s.dur + 0.05);
+        // Detune the top voice by +6 cents to add chorus-like beat.
+        if (i === s.chord.length - 1) {
+          const osc2 = ctx.createOscillator();
+          osc2.type = 'square';
+          osc2.frequency.setValueAtTime(f * 1.0035, t0 + s.at);
+          osc2.connect(g);
+          osc2.start(t0 + s.at);
+          osc2.stop(t0 + s.at + s.dur + 0.05);
+        }
       }
     }
-    window.setTimeout(() => ctx.close().catch(() => {}), 6500);
+    // Natural synth riff length (~5.5s); cap at maxDurationMs with a fade.
+    const naturalEndMs = 6000;
+    const totalMs = Math.min(naturalEndMs, maxDurationMs);
+    const fadeStart = Math.max(0, totalMs - fadeMs);
+
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      const now = ctx.currentTime;
+      const safeFadeSec = Math.max(0.05, fadeMs / 1000);
+      master.gain.cancelScheduledValues(now);
+      master.gain.setValueAtTime(master.gain.value, now);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + safeFadeSec);
+      window.setTimeout(() => ctx.close().catch(() => {}), fadeMs + 100);
+    };
+
+    if (fadeStart > 0 && fadeStart < naturalEndMs) {
+      window.setTimeout(stop, fadeStart);
+    } else {
+      window.setTimeout(() => ctx.close().catch(() => {}), totalMs + 200);
+    }
+    return stop;
   } catch {
     /* ignore — boot riff is non-critical */
+    return () => {};
   }
 }
