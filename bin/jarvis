@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# `jarvis` — one-shot launcher for the Filip Jarvis Cockpit.
+# Starts the cockpit backend (uvicorn) + Vite frontend, opens the browser,
+# and shuts both down cleanly on Ctrl+C.
+#
+# Usage: just type `jarvis` in any terminal.
+#   jarvis            # launch (default)
+#   jarvis status     # show what's running
+#   jarvis stop       # stop background services
+#   jarvis logs       # tail backend + frontend logs
+
+set -u
+
+REPO="${JARVIS_REPO:-/home/zer0/Projects/OpenJarvis}"
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/jarvis"
+BACKEND_LOG="$LOG_DIR/backend.log"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
+PID_DIR="${XDG_RUNTIME_DIR:-/tmp}/jarvis"
+BACKEND_PID="$PID_DIR/backend.pid"
+FRONTEND_PID="$PID_DIR/frontend.pid"
+BACKEND_PORT="${JARVIS_BACKEND_PORT:-8000}"
+FRONTEND_PORT="${JARVIS_FRONTEND_PORT:-5173}"
+COCKPIT_URL="http://localhost:${FRONTEND_PORT}/filip-cockpit"
+
+mkdir -p "$LOG_DIR" "$PID_DIR"
+
+cyan()  { printf '\033[36m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+dim()   { printf '\033[2m%s\033[0m\n' "$*"; }
+
+port_in_use() {
+    local port=$1
+    (echo > /dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1
+}
+
+read_pid() {
+    [[ -f "$1" ]] && cat "$1" 2>/dev/null
+}
+
+pid_alive() {
+    local pid=$1
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+stop_pid() {
+    local pid_file=$1 label=$2
+    local pid; pid=$(read_pid "$pid_file")
+    if pid_alive "$pid"; then
+        kill -TERM "$pid" 2>/dev/null
+        for _ in 1 2 3 4 5; do
+            pid_alive "$pid" || break
+            sleep 0.2
+        done
+        pid_alive "$pid" && kill -KILL "$pid" 2>/dev/null
+        dim "stopped $label (pid $pid)"
+    fi
+    rm -f "$pid_file"
+}
+
+wait_port() {
+    local port=$1 label=$2 tries=60
+    while (( tries-- > 0 )); do
+        port_in_use "$port" && return 0
+        sleep 0.5
+    done
+    red "$label did not come up on port $port — see logs in $LOG_DIR"
+    return 1
+}
+
+start_backend() {
+    if port_in_use "$BACKEND_PORT"; then
+        dim "backend already on :$BACKEND_PORT — reusing"
+        return 0
+    fi
+    cyan "starting cockpit backend on :$BACKEND_PORT"
+    ( cd "$REPO" && \
+      nohup uv run --extra server python -m uvicorn \
+            openjarvis.server.cockpit_app:app \
+            --host 127.0.0.1 --port "$BACKEND_PORT" \
+            >"$BACKEND_LOG" 2>&1 & echo $! > "$BACKEND_PID"
+    )
+    wait_port "$BACKEND_PORT" "backend"
+}
+
+start_frontend() {
+    if port_in_use "$FRONTEND_PORT"; then
+        dim "frontend already on :$FRONTEND_PORT — reusing"
+        return 0
+    fi
+    cyan "starting frontend (vite) on :$FRONTEND_PORT"
+    ( cd "$REPO/frontend" && \
+      nohup npm run dev -- --port "$FRONTEND_PORT" --strictPort \
+            >"$FRONTEND_LOG" 2>&1 & echo $! > "$FRONTEND_PID"
+    )
+    wait_port "$FRONTEND_PORT" "frontend"
+}
+
+cmd_launch() {
+    start_backend || exit 1
+    start_frontend || exit 1
+    green "cockpit up"
+    cyan  "  -> $COCKPIT_URL"
+    dim   "  logs: $LOG_DIR"
+    dim   "  stop: jarvis stop"
+    command -v xdg-open >/dev/null && xdg-open "$COCKPIT_URL" >/dev/null 2>&1 &
+}
+
+cmd_status() {
+    local b f
+    b=$(read_pid "$BACKEND_PID");  f=$(read_pid "$FRONTEND_PID")
+    if pid_alive "$b"; then green "backend  :$BACKEND_PORT (pid $b)"
+    else dim "backend  not running"; fi
+    if pid_alive "$f"; then green "frontend :$FRONTEND_PORT (pid $f)"
+    else dim "frontend not running"; fi
+    port_in_use "$BACKEND_PORT"  && cyan "  api : http://127.0.0.1:$BACKEND_PORT"
+    port_in_use "$FRONTEND_PORT" && cyan "  ui  : $COCKPIT_URL"
+    return 0
+}
+
+cmd_stop() {
+    stop_pid "$FRONTEND_PID" "frontend"
+    stop_pid "$BACKEND_PID"  "backend"
+    green "cockpit stopped"
+}
+
+cmd_logs() {
+    [[ -f "$BACKEND_LOG"  ]] || { red "no backend log yet";  exit 1; }
+    [[ -f "$FRONTEND_LOG" ]] || { red "no frontend log yet"; exit 1; }
+    tail -n 40 -F "$BACKEND_LOG" "$FRONTEND_LOG"
+}
+
+case "${1:-launch}" in
+    launch|up|start|"") cmd_launch ;;
+    status|ps)          cmd_status ;;
+    stop|down|kill)     cmd_stop ;;
+    logs|tail)          cmd_logs ;;
+    *)
+        red "unknown: $1"
+        echo "usage: jarvis [launch|status|stop|logs]"
+        exit 2 ;;
+esac
