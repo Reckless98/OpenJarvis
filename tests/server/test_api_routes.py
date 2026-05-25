@@ -168,7 +168,15 @@ class TestCockpitRoutes:
         )
         assert resp.status_code == 400
 
-    def test_cockpit_routes_free_form_to_claude_chat(self, tmp_path):
+    def test_cockpit_routes_free_form_to_claude_chat(self, tmp_path, monkeypatch):
+        import shutil
+
+        real_which = shutil.which
+        monkeypatch.setattr(
+            filip_cockpit.shutil,
+            "which",
+            lambda name: "" if name == "opencode" else real_which(name),
+        )
         client = TestClient(_make_app())
         resp = client.post(
             "/v1/cockpit/run",
@@ -181,6 +189,28 @@ class TestCockpitRoutes:
         assert resp.status_code == 200
         data = resp.json()
         assert data["backend"] == "claude"
+        assert data["action"] == "chat"
+
+    def test_cockpit_routes_free_form_to_opencode_when_present(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            filip_cockpit.shutil,
+            "which",
+            lambda name: "/bin/opencode" if name == "opencode" else "",
+        )
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/cockpit/run",
+            json={
+                "command": "what time is it sir",
+                "repo_path": str(tmp_path),
+                "dry_run": True,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["backend"] == "opencode"
         assert data["action"] == "chat"
 
     def test_cockpit_ping_still_routes_to_safe_shell(self, tmp_path):
