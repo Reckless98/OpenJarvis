@@ -99,21 +99,60 @@ def test_extract_youtube_query_pulls_after_search_or_play() -> None:
     )
 
 
-def test_playwright_run_dispatches_play_to_youtube_search(monkeypatch) -> None:
-    """'play <song>' (no URL) should route to _drive_youtube_search.
+def test_playwright_run_dispatches_play_to_resolve_path(monkeypatch) -> None:
+    """'play <song>' (no URL) should route to _resolve_play_request.
 
-    We don't actually launch a browser — we monkeypatch the driver and check
-    the query is what the user said (minus the leading 'play ').
+    We don't actually shell out to yt-dlp — we monkeypatch the resolver and
+    check the query is what the user said (minus the leading 'play ').
     """
     captured: dict[str, str] = {}
 
-    def fake_drive(query: str):
+    def fake_resolve(query: str):
         captured["query"] = query
         from openjarvis.core.types import ToolResult
 
         return ToolResult("playwright_bridge", content="ok", success=True)
 
-    monkeypatch.setattr(pb, "_drive_youtube_search", fake_drive)
+    monkeypatch.setattr(pb, "_resolve_play_request", fake_resolve)
     result = pb.playwright_run("play tread on me by cain")
     assert result.success is True
     assert captured["query"] == "tread on me by cain"
+
+
+def test_resolve_play_falls_back_when_yt_dlp_missing(monkeypatch) -> None:
+    """When yt-dlp isn't installed, fall back to the headed browser path."""
+    called: dict[str, str] = {}
+
+    def fake_drive(query: str):
+        called["query"] = query
+        from openjarvis.core.types import ToolResult
+
+        return ToolResult("playwright_bridge", content="fallback", success=True)
+
+    monkeypatch.setattr(pb.shutil, "which", lambda _name: "")
+    monkeypatch.setattr(pb, "_drive_youtube_search", fake_drive)
+    result = pb._resolve_play_request("some song")
+    assert result.success is True
+    assert called["query"] == "some song"
+
+
+def test_resolve_play_returns_video_id_metadata(monkeypatch) -> None:
+    """When yt-dlp returns a hit, metadata carries video_id + title."""
+    import subprocess as sp_mod
+
+    monkeypatch.setattr(
+        pb.shutil, "which",
+        lambda name: "/usr/bin/yt-dlp" if name == "yt-dlp" else "",
+    )
+
+    def fake_run(args, *, capture_output, text, timeout, check):
+        payload = (
+            '{"entries": [{"id": "abc123", "title": "Some Song - Artist"}]}'
+        )
+        return sp_mod.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(pb.subprocess, "run", fake_run)
+    result = pb._resolve_play_request("some song")
+    assert result.success is True
+    assert result.metadata.get("video_id") == "abc123"
+    assert result.metadata.get("video_title") == "Some Song - Artist"

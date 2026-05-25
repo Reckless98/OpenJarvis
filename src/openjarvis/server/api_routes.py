@@ -935,6 +935,13 @@ async def run_cockpit(req: CockpitRunRequest, request: Request):
             backend_override=backend_override,
             model=model,
         )
+        # Lift a few well-known fields out of the tool's metadata so the
+        # cockpit UI can act on them (e.g. play the resolved YouTube video
+        # in its hidden IFrame without re-parsing the result string).
+        metadata = getattr(result, "metadata", None) or {}
+        is_dict = isinstance(metadata, dict)
+        video_id = metadata.get("video_id", "") if is_dict else ""
+        video_title = metadata.get("video_title", "") if is_dict else ""
         return {
             "backend": decision.backend,
             "reason": decision.reason,
@@ -943,6 +950,8 @@ async def run_cockpit(req: CockpitRunRequest, request: Request):
             "success": result.success,
             "result": result.content,
             "available": detect_tools(),
+            "video_id": video_id,
+            "video_title": video_title,
         }
     except HTTPException:
         raise

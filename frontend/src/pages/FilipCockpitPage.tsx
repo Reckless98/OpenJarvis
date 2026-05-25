@@ -15,6 +15,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { JarvisCircle, type JarvisState } from '../components/JarvisCircle';
+import { JarvisMusicPlayer } from '../components/JarvisMusicPlayer';
 import { fetchCockpitBackends, runCockpit } from '../lib/api';
 import type { CockpitBackendInfo, CockpitRunResponse } from '../lib/api';
 import {
@@ -23,6 +24,7 @@ import {
   type CockpitPrefs,
 } from '../lib/cockpitPrefs';
 import { useClapDetector } from '../lib/useClapDetector';
+import { useMusicPlayer } from '../lib/useMusicPlayer';
 import { useVoice } from '../lib/useVoice';
 import { bootRiff, playWakeCue } from '../lib/wakeSounds';
 
@@ -199,6 +201,19 @@ export function FilipCockpitPage() {
   const canRun = command.trim().length > 0 && !loading;
 
   const voice = useVoice(prefs.ttsEnabled);
+  const musicPlayer = useMusicPlayer();
+
+  // Duck the music while Jarvis speaks; restore when TTS is done.
+  // Wrapped on top of voice.speaking so any path that triggers TTS (clarify,
+  // wake ack, normal reply) ducks consistently.
+  useEffect(() => {
+    if (!musicPlayer.isPlaying) return;
+    if (voice.speaking) {
+      musicPlayer.duck(15);
+    } else {
+      musicPlayer.restore(100);
+    }
+  }, [voice.speaking, musicPlayer]);
 
   const submit = async (overrideCommand?: string) => {
     const next = (overrideCommand ?? command).trim();
@@ -220,6 +235,17 @@ export function FilipCockpitPage() {
           ? `Routed to ${response.backend}${response.model ? ` (${response.model})` : ''}`
           : `Failed on ${response.backend}`,
       );
+      // Music: if the playwright 'play' action resolved a video id, hand it
+      // off to the in-page IFrame so it actually plays *and* survives the
+      // backend closing the headless browser.
+      if (
+        response.success
+        && response.backend === 'playwright'
+        && response.action === 'play'
+        && response.video_id
+      ) {
+        void musicPlayer.play(response.video_id, response.video_title);
+      }
       // Clarify flow: when a tool returns action='clarify', the `result`
       // is the question Jarvis wants to ask. Speak it, listen once for
       // the answer, then re-submit the original command + answer so the
@@ -404,6 +430,7 @@ export function FilipCockpitPage() {
             </h1>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+            <JarvisMusicPlayer player={musicPlayer} />
             <span className="inline-flex items-center gap-1.5">
               <ShieldCheck size={14} style={{ color: 'var(--color-success)' }} />
               {prefs.wakeMode === 'off' ? 'Wake off' : `Wake: ${prefs.wakeMode}`}
@@ -725,7 +752,7 @@ export function FilipCockpitPage() {
           </section>
         )}
 
-        {statusLine && (
+        {(voice.partial || statusLine) && (
           <div
             className="rounded-lg px-3 py-2 text-xs"
             style={{
@@ -734,7 +761,14 @@ export function FilipCockpitPage() {
               color: 'var(--color-text-secondary)',
             }}
           >
-            {statusLine}
+            {voice.partial ? (
+              <span>
+                <span style={{ color: 'var(--color-accent)' }}>Hearing: </span>
+                {voice.partial}
+              </span>
+            ) : (
+              statusLine
+            )}
           </div>
         )}
 

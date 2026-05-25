@@ -131,6 +131,112 @@ def test_make_project_clarifies_when_name_missing(tmp_path, monkeypatch) -> None
     assert route_text("make me a project called widget").action == "scaffold"
 
 
+def test_route_text_routes_factual_web_questions_to_perplexity() -> None:
+    """Phase 4 widening — short factual asks should hit Sonar, not Claude."""
+    assert route_text("what version of React is current").backend == "perplexity"
+    assert route_text("what is the latest Next.js release").backend == "perplexity"
+    assert route_text("who is the CEO of Anthropic").backend == "perplexity"
+    assert route_text("when did Python 3.13 release").backend == "perplexity"
+    assert route_text("docs for fastapi dependencies").backend == "perplexity"
+    assert route_text("changelog for sqlalchemy 2.1").backend == "perplexity"
+    assert route_text("look up the GH Actions runner image").backend == "perplexity"
+
+
+def test_route_text_routes_bare_url_to_perplexity() -> None:
+    """A pasted URL with no Playwright verb → Perplexity summarization."""
+    assert route_text("what's at https://example.com/blog/post").backend == "perplexity"
+
+
+def test_route_text_routes_terminal_intent() -> None:
+    assert route_text("open terminal").backend == "terminal"
+    assert route_text("launch terminal please").backend == "terminal"
+    assert route_text("open a terminal window").backend == "terminal"
+
+
+def test_route_text_routes_file_write_intent() -> None:
+    a = route_text("write a file ~/Projects/foo.txt with hi").backend
+    b = route_text("create a file /tmp/jarvis-test.txt with hello").backend
+    assert a == "file_write"
+    assert b == "file_write"
+
+
+def test_route_text_routes_subagent_spawn_intent() -> None:
+    a = route_text("spawn subagent to map the routing").backend
+    b = route_text("delegate to subagent: find dead code").backend
+    assert a == "subagent_spawn"
+    assert b == "subagent_spawn"
+
+
+def test_route_text_routes_natural_council_phrasings() -> None:
+    a = route_text("what do all the models think about Rust async").action
+    b = route_text("get a second opinion from the council").action
+    assert a == "council"
+    assert b == "council"
+
+
+def test_route_text_prefers_opencode_for_short_chat_when_available(monkeypatch) -> None:
+    """Short fallback asks go to OpenCode when the binary is installed."""
+    monkeypatch.setattr(
+        filip_cockpit.shutil,
+        "which",
+        lambda name: "/bin/opencode" if name == "opencode" else "",
+    )
+    decision = route_text("how do you feel today")
+    assert decision.backend == "opencode"
+
+
+def test_route_text_falls_back_to_claude_when_opencode_missing(monkeypatch) -> None:
+    monkeypatch.setattr(filip_cockpit.shutil, "which", lambda _name: "")
+    decision = route_text("how do you feel today")
+    assert decision.backend == "claude"
+
+
+def test_open_terminal_uses_x_terminal_emulator(monkeypatch) -> None:
+    """open_terminal must spawn the allowlisted emulator, not the shell."""
+    called: dict[str, list[str]] = {}
+
+    class FakePopen:
+        def __init__(self, args, **_kwargs):
+            called["args"] = args
+
+    monkeypatch.setattr(
+        filip_cockpit.shutil, "which",
+        lambda name: (
+            "/bin/x-terminal-emulator"
+            if name == "x-terminal-emulator"
+            else ""
+        ),
+    )
+    import subprocess as _sp
+
+    monkeypatch.setattr(_sp, "Popen", FakePopen)
+    result = filip_cockpit.open_terminal("open terminal")
+    assert result.success is True
+    assert called["args"] == ["/bin/x-terminal-emulator"]
+
+
+def test_file_write_creates_file_under_projects(tmp_path, monkeypatch) -> None:
+    """file_write_request should accept a path under ~/Projects and write it."""
+    fake_projects = tmp_path / "Projects"
+    fake_projects.mkdir()
+    monkeypatch.setattr(filip_cockpit, "_PROJECTS_ROOT", fake_projects)
+    target = fake_projects / "demo" / "hello.txt"
+    text = f"write a file {target} with hello world"
+    result = filip_cockpit.file_write_request(text)
+    assert result.success is True
+    assert target.read_text(encoding="utf-8") == "hello world"
+
+
+def test_file_write_rejects_secret_paths(tmp_path, monkeypatch) -> None:
+    fake_projects = tmp_path / "Projects"
+    fake_projects.mkdir()
+    monkeypatch.setattr(filip_cockpit, "_PROJECTS_ROOT", fake_projects)
+    result = filip_cockpit.file_write_request(
+        f"write a file {fake_projects}/demo/.env with SECRET=abc"
+    )
+    assert result.success is False
+
+
 def test_route_text_routes_play_song_to_playwright() -> None:
     """'play <song>' goes to the Playwright bridge so it actually plays."""
     assert route_text("play tread on me by cain").backend == "playwright"

@@ -267,6 +267,10 @@ export interface CockpitRunResponse {
   success: boolean;
   result: string;
   available: Record<string, string>;
+  // Phase 4: playwright `play` action returns the resolved YT video id so
+  // the cockpit can hand it to the in-page IFrame player.
+  video_id?: string;
+  video_title?: string;
 }
 
 export async function runCockpit(body: CockpitRunRequest): Promise<CockpitRunResponse> {

@@ -106,6 +106,15 @@ BACKEND_MODELS: dict[str, list[str]] = {
     "launcher": [""],
     "make_project": [""],
     "playwright": [""],
+    "opencode": [
+        "",
+        "opencode-go/deepseek-v4-flash",
+        "opencode-go/glm-5.1",
+        "opencode-go/kimi-k2.6",
+        "opencode-go/qwen3.6-plus",
+        "opencode/big-pickle",
+        "opencode/deepseek-v4-flash-free",
+    ],
 }
 
 
@@ -205,6 +214,7 @@ def detect_tools() -> dict[str, str]:
         "pwm": shutil.which("pwm") or "",
         "pwm-mcp": shutil.which("pwm-mcp") or "",
         "aria-handoff": shutil.which("aria-handoff") or "",
+        "opencode": shutil.which("opencode") or "",
     }
 
 
@@ -276,6 +286,16 @@ def backend_status() -> dict[str, dict[str, Any]]:
             "uses": (
                 "persistent profile at ~/.openjarvis/playwright-profile "
                 "(auto headed/headless)"
+            ),
+        },
+        "opencode": {
+            "label": "OpenCode (free tier)",
+            "available": bool(paths["opencode"]),
+            "path": paths["opencode"],
+            "models": BACKEND_MODELS["opencode"],
+            "uses": (
+                "opencode run --format json (Go-tier free until 2026-06-06, "
+                "then OSS fallback)"
             ),
         },
     }
@@ -354,6 +374,35 @@ def route_text(text: str) -> RouteDecision:
         return RouteDecision(
             "make_project", "ask Filip for the project name", "clarify"
         )
+    # Terminal launch — "open terminal" / "launch terminal" / "new terminal".
+    # Has to land BEFORE the launcher branch so "open terminal" doesn't
+    # fall into the generic xdg-open flow.
+    if (
+        "open terminal" in lowered
+        or "launch terminal" in lowered
+        or "new terminal" in lowered
+        or "open a terminal" in lowered
+    ):
+        return RouteDecision("terminal", "spawn x-terminal-emulator", "spawn")
+    # File-write — "write a file <path>" / "save a file <path>" / "create a file <p>".
+    if (
+        "write a file" in lowered
+        or "save a file" in lowered
+        or "create a file" in lowered
+        or "write to file" in lowered
+    ):
+        return RouteDecision("file_write", "create / overwrite a file", "write")
+    # Sub-agent delegation — explicit asks for an isolated Claude subagent.
+    if (
+        "spawn subagent" in lowered
+        or "spawn a subagent" in lowered
+        or "delegate to subagent" in lowered
+        or "run subagent" in lowered
+        or "spin up a subagent" in lowered
+    ):
+        return RouteDecision(
+            "subagent_spawn", "delegate to claude --agents subagent", "spawn"
+        )
     # Browser automation — explicit asks routed to Playwright bridge.
     # Examples: "log in to <site>", "open youtube and search for ...",
     # "post a tweet ...", "click the play button on this page". Lands
@@ -419,10 +468,63 @@ def route_text(text: str) -> RouteDecision:
             "compare models on",
             "what does each model think",
             "consensus view",
+            "what do all the models think",
+            "get a second opinion from",
+            "synthesize from",
+            "synthesise from",
         )
     ):
         return RouteDecision(
             "perplexity", "multi-model debate requested", "council"
+        )
+    # Web-factual questions — short conversational lookups that Claude
+    # would otherwise answer from training data and get wrong. Route to
+    # Perplexity (Sonar 2; cheap) so we get a live web answer with sources.
+    perplexity_phrases = (
+        "what version of",
+        "what is the latest",
+        "what's the latest",
+        "what are the latest",
+        "what is the current",
+        "what's the current",
+        "who is the ",
+        "who's the ",
+        "when did ",
+        "when was ",
+        "when will ",
+        "where is the ",
+        "where's the ",
+        "how much is ",
+        "how many ",
+        "is there a new",
+        "does the new",
+        "has anyone ",
+        "any updates on ",
+        "any news about ",
+        "docs for ",
+        "documentation for ",
+        "api reference for ",
+        "changelog for ",
+        # Generic "look this up" intents.
+        "look up ",
+        "fact check ",
+        "double check ",
+    )
+    if any(phrase in lowered for phrase in perplexity_phrases):
+        return RouteDecision(
+            "perplexity", "factual web lookup", "search"
+        )
+    # If the user pasted a URL but didn't ask Playwright to drive it,
+    # treat it as "summarize / fetch what's at this URL" — Perplexity handles
+    # link summarization well.
+    if ("http://" in lowered or "https://" in lowered) and not (
+        "screenshot" in lowered
+        or "log in" in lowered
+        or "login" in lowered
+        or "browse to" in lowered
+    ):
+        return RouteDecision(
+            "perplexity", "URL summarization via Perplexity", "search"
         )
     if any(
         word in lowered
@@ -531,9 +633,17 @@ def route_text(text: str) -> RouteDecision:
         )
     ):
         return RouteDecision("safe_shell", "local read-only status requested", "status")
-    # Conversational fallback — anything else is a Jarvis chat turn handled by
-    # Claude (CLI session, no API key). The `chat` action tells execute_route
-    # to dispatch to jarvis_chat() rather than the structured reviewer path.
+    # Conversational fallback — short asks (< 300 chars) prefer OpenCode
+    # when it's installed (T0: free Go-tier until 2026-06-06, then OSS).
+    # Falls back to Claude for longer prompts that benefit from a stronger
+    # model and for tool-rich requests.
+    if len(text.strip()) < 300 and shutil.which("opencode"):
+        return RouteDecision(
+            "opencode", "short conversational ask — free tier preferred", "chat"
+        )
+    # Anything else is a Jarvis chat turn handled by Claude (CLI session,
+    # no API key). The `chat` action tells execute_route to dispatch to
+    # jarvis_chat() rather than the structured reviewer path.
     return RouteDecision("claude", "conversational request — Jarvis persona", "chat")
 
 
@@ -591,6 +701,16 @@ def execute_route(
         from openjarvis.tools.playwright_bridge import playwright_run
 
         result = playwright_run(text, repo=repo)
+    elif decision.backend == "opencode":
+        from openjarvis.tools.opencode_bridge import opencode_run
+
+        result = opencode_run(text, repo=repo, model=model)
+    elif decision.backend == "terminal":
+        result = open_terminal(text)
+    elif decision.backend == "file_write":
+        result = file_write_request(text, repo)
+    elif decision.backend == "subagent_spawn":
+        result = subagent_spawn(text, repo)
     elif decision.backend == "lumo":
         result = lumo_offload("summarize", text, None, repo)
     elif decision.backend == "perplexity":
@@ -947,6 +1067,187 @@ def make_project(text: str) -> ToolResult:
             f"Project '{name}' is ready at {target}, sir. "
             f"README and .gitignore in place; git {git_status}."
         ),
+        success=True,
+    )
+
+
+_FILE_WRITE_PATH_RE = re.compile(r"([\/~][\w.\-\/]+)")
+_FILE_WRITE_BODY_MARKERS = (" with ", " containing ", " contents: ", ": ")
+
+
+def open_terminal(text: str) -> ToolResult:
+    """Spawn a new terminal window (x-terminal-emulator) detached from the cockpit."""
+    _ = text
+    binary = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal")
+    if not binary:
+        return ToolResult(
+            "open_terminal",
+            content=(
+                "No terminal emulator found on PATH (tried x-terminal-emulator, "
+                "gnome-terminal). Install one and try again, sir."
+            ),
+            success=False,
+        )
+    try:
+        import subprocess as _sp
+
+        _sp.Popen(  # noqa: S603 — fixed allowlisted binary
+            [binary],
+            stdout=_sp.DEVNULL,
+            stderr=_sp.DEVNULL,
+            stdin=_sp.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return ToolResult(
+            "open_terminal",
+            content=f"Failed to spawn terminal: {exc}",
+            success=False,
+        )
+    return ToolResult(
+        "open_terminal",
+        content="Terminal opened, sir.",
+        success=True,
+    )
+
+
+def file_write_request(text: str, repo: Path | None = None) -> ToolResult:
+    """Parse 'write a file <path> with <contents>' and create/overwrite the file.
+
+    Constraints:
+      - Path must be under ``~/Projects/`` (or under ``repo`` if given).
+      - Refuses to write files that look like secrets (``.env``, ``*.key``,
+        ``credentials.*``, etc.) — caught via the existing SECRET_PATH_PATTERNS.
+      - Refuses payloads that look like secrets (high-entropy tokens, etc.).
+    """
+    match = _FILE_WRITE_PATH_RE.search(text)
+    if not match:
+        return ToolResult(
+            "file_write",
+            content=(
+                "Which file shall I write, sir? Try "
+                "'write a file ~/Projects/foo/notes.md with hello'."
+            ),
+            success=True,  # clarify-style ask, not a hard failure
+        )
+    raw_path = match.group(1)
+    body = ""
+    lowered = text.lower()
+    for marker in _FILE_WRITE_BODY_MARKERS:
+        idx = lowered.find(marker, match.end())
+        if idx >= 0:
+            body = text[idx + len(marker):].strip()
+            break
+    if _looks_secret(raw_path) or _looks_secret(body):
+        return ToolResult(
+            "file_write",
+            content=(
+                "That path or content looks sensitive — I won't write it, sir. "
+                "Use a non-secret file or store secrets in your keyring instead."
+            ),
+            success=False,
+        )
+    target = Path(raw_path).expanduser()
+    if not target.is_absolute():
+        target = (_resolve_repo(str(repo) if repo else None) / target).resolve()
+    # Restrict writes to ~/Projects or the active repo.
+    allowed_roots = (
+        _PROJECTS_ROOT.resolve(),
+        _resolve_repo(str(repo) if repo else None).resolve(),
+    )
+    if not any(
+        str(target).startswith(str(root)) for root in allowed_roots
+    ):
+        return ToolResult(
+            "file_write",
+            content=(
+                f"Refusing to write outside ~/Projects/ or the active repo "
+                f"({target}), sir."
+            ),
+            success=False,
+        )
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    except OSError as exc:
+        return ToolResult(
+            "file_write",
+            content=f"Write failed: {exc}",
+            success=False,
+        )
+    return ToolResult(
+        "file_write",
+        content=f"Wrote {len(body)} bytes to {target}, sir.",
+        success=True,
+        metadata={"path": str(target), "bytes": len(body)},
+    )
+
+
+def subagent_spawn(text: str, repo: Path | None = None) -> ToolResult:
+    """Spawn an isolated Claude subagent for the requested objective.
+
+    Wraps ``claude --agents '<json>' --task '<objective>' -p`` so the cockpit
+    can hand off bounded sub-tasks (research, code-spelunking, doc drafts)
+    without the main Claude session losing context.
+    """
+    repo = _resolve_repo(str(repo) if repo else None)
+    claude = shutil.which("claude")
+    if not claude:
+        return _missing("subagent_spawn", "claude")
+    # Strip the routing verb so the objective is clean.
+    objective = text
+    lowered = text.lower()
+    for prefix in (
+        "spawn subagent ",
+        "spawn a subagent ",
+        "delegate to subagent ",
+        "run subagent ",
+        "spin up a subagent ",
+        "spawn subagent:",
+        "delegate to subagent:",
+    ):
+        if lowered.startswith(prefix):
+            objective = text[len(prefix):].strip().lstrip(":").strip()
+            break
+    if not objective:
+        return ToolResult(
+            "subagent_spawn",
+            content="What should the subagent do, sir?",
+            success=True,
+        )
+    agent_def = {
+        "scout": {
+            "description": "Bounded read-only investigation in this repo.",
+            "prompt": (
+                "You are a focused investigation subagent. Read what you "
+                "need, do not edit files, return a tight report under 200 "
+                "words with file paths and line numbers."
+            ),
+        }
+    }
+    args = [
+        claude,
+        "-p",
+        "--permission-mode", "plan",
+        "--add-dir", str(repo),
+        "--agents", json.dumps(agent_def),
+    ]
+    prompt = (
+        f"Use the 'scout' subagent to address: {_truncate(redact(objective), 2_000)}"
+    )
+    result = _run_command(args, cwd=repo, input_text=prompt, timeout=300)
+    if result.returncode != 0:
+        return ToolResult(
+            "subagent_spawn",
+            content=(
+                f"Subagent failed (exit {result.returncode}): "
+                f"{result.stderr.strip()[:240] or 'no stderr'}"
+            ),
+            success=False,
+        )
+    return ToolResult(
+        "subagent_spawn",
+        content=_truncate(result.stdout.strip() or "(empty reply)", MAX_OUTPUT_CHARS),
         success=True,
     )
 

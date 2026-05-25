@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -164,13 +165,15 @@ def playwright_run(text: str, repo: Path | None = None) -> ToolResult:
         query = _extract_youtube_query(text)
         return _drive_youtube_search(query)
 
-    # "play <song>" → YouTube search + click the top result. We treat this as
-    # a music query as long as there's no explicit URL — sites with their own
-    # play verb (Spotify, Apple Music) aren't bridged yet, so YouTube is the
-    # fallback "play any audio" path.
+    # "play <song>" → resolve the top YouTube hit's video id and let the
+    # cockpit's in-page IFrame player handle playback. yt-dlp gives us the
+    # id without launching a browser at all, which keeps the audio alive
+    # across the response (Playwright would close the page and kill it).
+    # Falls back to the original Playwright search+click if yt-dlp isn't
+    # available.
     if not url and lowered.startswith("play "):
         query = _extract_youtube_query(text)
-        return _drive_youtube_search(query)
+        return _resolve_play_request(query)
 
     if "screenshot" in lowered and url:
         return _drive_screenshot(url)
@@ -337,6 +340,64 @@ def _drive_login(url: str) -> ToolResult:
         )
     except Exception as exc:  # noqa: BLE001
         return _exception_result(exc)
+
+
+def _resolve_play_request(query: str) -> ToolResult:
+    """Return the top YouTube video id for `query` so the IFrame can play it.
+
+    Uses yt-dlp's metadata-only search (no download, no browser). When yt-dlp
+    isn't installed or the lookup fails, falls back to `_drive_youtube_search`
+    so the user still gets *something*. Sets `metadata['video_id']` and
+    `metadata['video_title']` on success.
+    """
+    if not query:
+        return ToolResult(
+            "playwright_bridge",
+            content="What would you like me to play, sir?",
+            success=False,
+        )
+    yt_dlp = shutil.which("yt-dlp")
+    if not yt_dlp:
+        # Graceful fallback — opens the headed browser the old way.
+        return _drive_youtube_search(query)
+    try:
+        # `ytsearch1:` returns the top hit. `-J` dumps JSON metadata only.
+        proc = subprocess.run(
+            [yt_dlp, "--no-warnings", "--no-playlist", "-J", "--flat-playlist",
+             "--default-search", "ytsearch1", f"ytsearch1:{query}"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return _drive_youtube_search(query)
+        data = json.loads(proc.stdout)
+        # ytsearch returns a playlist with one entry.
+        entries = data.get("entries") or []
+        if not entries:
+            return _drive_youtube_search(query)
+        first = entries[0]
+        video_id = first.get("id") or first.get("video_id") or ""
+        title = first.get("title") or ""
+        if not video_id:
+            return _drive_youtube_search(query)
+        return ToolResult(
+            "playwright_bridge",
+            content=_format_result(
+                {
+                    "mode": "iframe",
+                    "query": query,
+                    "video_id": video_id,
+                    "title": title,
+                    "note": (
+                        "Cockpit IFrame will play this; audio survives "
+                        "across calls."
+                    ),
+                }
+            ),
+            success=True,
+            metadata={"video_id": video_id, "video_title": title},
+        )
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return _drive_youtube_search(query)
 
 
 def _drive_youtube_search(query: str) -> ToolResult:

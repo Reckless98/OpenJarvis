@@ -6,6 +6,9 @@ interface ClapDetectorOptions {
   threshold?: number;
   gapMs?: number;
   cooldownMs?: number;
+  dynamicMult?: number;
+  staticFloor?: number;
+  minSpikeSeparationMs?: number;
 }
 
 interface ClapDetectorState {
@@ -15,18 +18,26 @@ interface ClapDetectorState {
 }
 
 // Static absolute floor — we never trigger below this RMS no matter how
-// quiet the room is, so mic hiss / fan hum can't fire a clap.
-const STATIC_FLOOR = 0.06;
+// quiet the room is, so mic hiss / fan hum can't fire a clap. Bumped from
+// 0.06 → 0.10 after live use: fans, drawer scrapes, and key thuds were
+// hitting the old floor.
+const STATIC_FLOOR = 0.10;
 // The dynamic threshold is `max(STATIC_FLOOR, baseline * MULT)`. With
-// MULT=4, the detector fires on any sample 4× louder than the rolling
+// MULT=6, the detector requires a sample 6× louder than the rolling
 // ambient noise floor — adapts to quiet rooms (Lamia2 idle ~0.005) and
-// noisy ones (open mic in a café ~0.05) without retuning.
-const DYNAMIC_MULT = 4;
+// noisy ones (open mic in a café ~0.05) without retuning. Was 4×; lifted
+// to suppress speech transients that occasionally double-fired.
+const DYNAMIC_MULT = 6;
 // Rolling baseline window in ms. 1.5s smooths out brief loud sounds but
 // stays responsive to a new ambient level (window opening, AC kicking in).
 const BASELINE_WINDOW_MS = 1500;
-const DEFAULT_GAP_MS = 1500;
+// Tight clap-clap gap (was 1500ms). Two real claps land within ~400-600ms.
+// 750ms allows a slight uneven rhythm without trapping single loud noises.
+const DEFAULT_GAP_MS = 750;
 const DEFAULT_COOLDOWN_MS = 2500;
+// Minimum spike separation — frame timing can register one clap as two
+// when the RMS sample straddles two frames at the boundary. 120ms guard.
+const MIN_SPIKE_SEPARATION_MS = 120;
 
 /**
  * Detect two RMS spikes within `gapMs` (i.e. "clap clap"). Pure browser:
@@ -39,6 +50,9 @@ export function useClapDetector(options: ClapDetectorOptions): ClapDetectorState
   const staticOverride = options.threshold;
   const gapMs = options.gapMs ?? DEFAULT_GAP_MS;
   const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+  const dynamicMult = options.dynamicMult ?? DYNAMIC_MULT;
+  const staticFloor = options.staticFloor ?? STATIC_FLOOR;
+  const minSpikeSeparationMs = options.minSpikeSeparationMs ?? MIN_SPIKE_SEPARATION_MS;
 
   const [ready, setReady] = useState(false);
   const [error, setError] = useState('');
@@ -96,7 +110,7 @@ export function useClapDetector(options: ClapDetectorOptions): ClapDetectorState
 
           // Feed the baseline only with quiet samples — claps and speech
           // shouldn't pollute the ambient floor estimate.
-          if (rms < STATIC_FLOOR * 1.5) {
+          if (rms < staticFloor * 1.5) {
             baselineHistory.push({ at: now, rms });
             while (
               baselineHistory.length > 0
@@ -111,9 +125,16 @@ export function useClapDetector(options: ClapDetectorOptions): ClapDetectorState
           }
 
           const dynamicThreshold = staticOverride
-            ?? Math.max(STATIC_FLOOR, baseline * DYNAMIC_MULT);
+            ?? Math.max(staticFloor, baseline * dynamicMult);
 
           if (rms > dynamicThreshold && armed && !inCooldown) {
+            // Reject spikes that arrive too close to the previous one —
+            // a real clap takes 80-120ms of envelope, so anything tighter
+            // is almost certainly the same impulse aliasing across frames.
+            if (lastSpikeAt && now - lastSpikeAt < minSpikeSeparationMs) {
+              raf = requestAnimationFrame(tick);
+              return;
+            }
             if (lastSpikeAt && now - lastSpikeAt <= gapMs) {
               lastFireAt = now;
               lastSpikeAt = 0;
@@ -157,7 +178,7 @@ export function useClapDetector(options: ClapDetectorOptions): ClapDetectorState
       setReady(false);
       setLevel(0);
     };
-  }, [enabled, staticOverride, gapMs, cooldownMs]);
+  }, [enabled, staticOverride, gapMs, cooldownMs, dynamicMult, staticFloor, minSpikeSeparationMs]);
 
   return { ready, error, level };
 }

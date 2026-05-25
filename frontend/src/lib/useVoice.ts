@@ -7,7 +7,12 @@ interface SRInstance {
   start: () => void;
   stop: () => void;
   abort: () => void;
-  onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>>; resultIndex: number }) => void) | null;
+  onresult:
+    | ((event: {
+        results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal?: boolean }>;
+        resultIndex: number;
+      }) => void)
+    | null;
   onerror: ((event: { error?: string }) => void) | null;
   onstart: (() => void) | null;
   onend: (() => void) | null;
@@ -86,11 +91,13 @@ export interface VoiceController {
   listening: boolean;
   /** Currently speaking via TTS. */
   speaking: boolean;
+  /** Live interim transcript while listening (cleared on finalize). */
+  partial: string;
   /** Most recent error message (if any). */
   error: string;
-  /** Start STT; resolves with the next transcript. Rejects on error/timeout. */
-  listenOnce: (timeoutMs?: number) => Promise<string>;
-  /** Start continuous STT — calls `onTranscript` for each utterance. Returns a stop fn. */
+  /** Start STT; resolves with the full transcript after a 2.5s silence gap. */
+  listenOnce: (timeoutMs?: number, silenceMs?: number) => Promise<string>;
+  /** Start continuous STT — calls `onTranscript` for each finalized utterance. Returns a stop fn. */
   listenContinuous: (onTranscript: (text: string) => void) => () => void;
   /** Stop any in-progress STT. */
   stopListening: () => void;
@@ -100,11 +107,20 @@ export interface VoiceController {
   cancelSpeak: () => void;
 }
 
-const STT_TIMEOUT_MS = 8000;
+// GPT-Voice ergonomics: long enough for a full sentence with mid-thought pauses,
+// short enough to feel responsive. 25s hard cap; finalize after 2.5s of silence.
+const STT_TIMEOUT_MS = 25000;
+const STT_SILENCE_MS = 2500;
+// Grace period after TTS ends before we let the continuous listener re-arm.
+// Prevents the tail of "playing now, sir" from bleeding into the next listen.
+const POST_TTS_GRACE_MS = 300;
 
 /**
- * Voice controller hardened for Chrome's quirks:
- * - Reuse a single `SpeechRecognition` instance across listen cycles
+ * Voice controller hardened for Chrome's quirks and tuned to GPT-Voice feel:
+ * - `listenOnce` runs continuous + interim and finalizes on a client-side
+ *   silence timer (2.5s by default) — so a mid-sentence pause doesn't cut you
+ *   off after the first few words.
+ * - Reuses a single `SpeechRecognition` instance across listen cycles
  *   (Chrome reprompts for mic permission if you recreate it on `file://`-ish
  *    contexts; reusing is also faster).
  * - Continuous mode handles Chrome's silent auto-stop by restarting on
@@ -114,6 +130,8 @@ const STT_TIMEOUT_MS = 8000;
  * - Pre-existing `MediaStreamTrack`s from the clap detector are NOT touched —
  *   Chrome re-uses the origin's mic grant, so STT and clap share the mic
  *   without re-prompting.
+ * - `speak()` toggles a `speakingRef`; listen calls short-circuit while TTS
+ *   is active so Jarvis doesn't transcribe his own voice.
  */
 export function useVoice(ttsEnabled: boolean): VoiceController {
   const SR = useRef<(new () => SRInstance) | null>(null);
@@ -121,8 +139,11 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
   const ttsSupportedRef = useRef(false);
   const recognitionRef = useRef<SRInstance | null>(null);
   const isRunningRef = useRef(false);
+  const speakingRef = useRef(false);
+  const ttsGraceUntilRef = useRef(0);
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [partial, setPartial] = useState('');
   const [error, setError] = useState('');
 
   if (SR.current === null) {
@@ -150,12 +171,16 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
     }
     isRunningRef.current = false;
     setListening(false);
+    setPartial('');
   }, []);
 
   const listenOnce = useCallback(
-    (timeoutMs: number = STT_TIMEOUT_MS): Promise<string> => {
+    (timeoutMs: number = STT_TIMEOUT_MS, silenceMs: number = STT_SILENCE_MS): Promise<string> => {
       const sr = getRecognition();
       if (!sr) return Promise.reject(new Error('SpeechRecognition not supported in this browser'));
+      if (speakingRef.current || performance.now() < ttsGraceUntilRef.current) {
+        return Promise.reject(new Error('STT blocked while Jarvis is speaking'));
+      }
       if (isRunningRef.current) {
         try {
           sr.abort();
@@ -164,47 +189,84 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
         }
       }
       return new Promise<string>((resolve, reject) => {
-        sr.continuous = false;
-        sr.interimResults = false;
+        sr.continuous = true;
+        sr.interimResults = true;
         let settled = false;
+        let finalBuffer = '';
+        let interimText = '';
+        let silenceTimer = 0;
+        const clearSilenceTimer = () => {
+          if (silenceTimer) {
+            clearTimeout(silenceTimer);
+            silenceTimer = 0;
+          }
+        };
         const finish = (fn: () => void) => {
           if (settled) return;
           settled = true;
-          clearTimeout(timer);
+          clearSilenceTimer();
+          clearTimeout(hardTimer);
           isRunningRef.current = false;
           setListening(false);
+          setPartial('');
           sr.onresult = null;
           sr.onerror = null;
           sr.onend = null;
           sr.onstart = null;
-          fn();
-        };
-        const timer = window.setTimeout(() => {
           try {
             sr.stop();
           } catch {
             /* ignore */
           }
-          finish(() => reject(new Error('STT timeout')));
-        }, timeoutMs);
+          fn();
+        };
+        const finalize = () => {
+          const text = (finalBuffer + ' ' + interimText).trim();
+          if (text) {
+            finish(() => resolve(text));
+          } else {
+            finish(() => reject(new Error('STT ended without result')));
+          }
+        };
+        const armSilenceTimer = () => {
+          clearSilenceTimer();
+          silenceTimer = window.setTimeout(finalize, silenceMs);
+        };
+        const hardTimer = window.setTimeout(finalize, timeoutMs);
         sr.onstart = () => {
           isRunningRef.current = true;
           setListening(true);
+          setPartial('');
           setError('');
+          armSilenceTimer();
         };
         sr.onresult = (event) => {
-          const transcript = Array.from(event.results)
-            .map((r) => r[0]?.transcript ?? '')
-            .join(' ')
-            .trim();
-          finish(() => resolve(transcript));
+          const results = Array.from(event.results);
+          let newFinal = '';
+          let newInterim = '';
+          for (const r of results) {
+            const text = r[0]?.transcript ?? '';
+            if (r.isFinal) {
+              newFinal += text + ' ';
+            } else {
+              newInterim += text + ' ';
+            }
+          }
+          finalBuffer = newFinal.trim();
+          interimText = newInterim.trim();
+          setPartial((finalBuffer + ' ' + interimText).trim());
+          armSilenceTimer();
         };
         sr.onerror = (event) => {
           const code = event.error ?? 'STT error';
+          // `no-speech` just means the silence timer should win — don't reject.
+          if (code === 'no-speech' || code === 'aborted') return;
           finish(() => reject(new Error(code)));
         };
         sr.onend = () => {
-          if (!settled) finish(() => reject(new Error('STT ended without result')));
+          // Chrome may auto-end after ~3-4s of silence. If we still have a
+          // pending silence timer, let it decide whether to finalize.
+          if (!settled && !silenceTimer) finalize();
         };
         try {
           sr.start();
@@ -227,8 +289,13 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
 
       const start = () => {
         if (!shouldListen || isRunningRef.current) return;
+        if (speakingRef.current || performance.now() < ttsGraceUntilRef.current) {
+          // Wait for TTS + grace to clear before re-arming.
+          window.setTimeout(start, 200);
+          return;
+        }
         sr.continuous = true;
-        sr.interimResults = false;
+        sr.interimResults = true;
         try {
           sr.start();
         } catch {
@@ -244,14 +311,24 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
       sr.onresult = (event) => {
         const idx = event.resultIndex ?? 0;
         const results = Array.from(event.results).slice(idx);
-        const text = results
-          .map((r) => r[0]?.transcript ?? '')
-          .join(' ')
-          .trim();
-        if (text) onTranscript(text);
+        let finalText = '';
+        let interimText = '';
+        for (const r of results) {
+          const text = r[0]?.transcript ?? '';
+          if (r.isFinal) finalText += text + ' ';
+          else interimText += text + ' ';
+        }
+        const combined = (finalText + interimText).trim();
+        if (combined) setPartial(combined);
+        if (finalText.trim()) {
+          setPartial('');
+          onTranscript(finalText.trim());
+        }
       };
       sr.onerror = (event) => {
         const code = event.error ?? 'STT error';
+        // Silent errors that just mean "restart" — don't surface or stop.
+        if (code === 'no-speech' || code === 'aborted') return;
         setError(code);
         if (code === 'not-allowed' || code === 'service-not-allowed') {
           shouldListen = false;
@@ -261,7 +338,7 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
         isRunningRef.current = false;
         setListening(false);
         // Chrome auto-stops after ~3-4s of silence. Restart immediately if
-        // the consumer still wants to listen.
+        // the consumer still wants to listen (and TTS isn't active).
         if (shouldListen) {
           window.setTimeout(start, 80);
         }
@@ -278,6 +355,7 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
         }
         isRunningRef.current = false;
         setListening(false);
+        setPartial('');
       };
     },
     [getRecognition],
@@ -290,6 +368,8 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
     } catch {
       /* ignore */
     }
+    speakingRef.current = false;
+    ttsGraceUntilRef.current = performance.now() + POST_TTS_GRACE_MS;
     setSpeaking(false);
   }, []);
 
@@ -303,12 +383,25 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
         utterance.lang = voice?.lang ?? 'en-GB';
         utterance.rate = 0.96;
         utterance.pitch = 0.9;
-        utterance.onstart = () => setSpeaking(true);
-        utterance.onend = () => setSpeaking(false);
-        utterance.onerror = () => setSpeaking(false);
+        utterance.onstart = () => {
+          speakingRef.current = true;
+          setSpeaking(true);
+        };
+        const finishSpeaking = () => {
+          speakingRef.current = false;
+          ttsGraceUntilRef.current = performance.now() + POST_TTS_GRACE_MS;
+          setSpeaking(false);
+        };
+        utterance.onend = finishSpeaking;
+        utterance.onerror = finishSpeaking;
+        // Mark speaking immediately so any racing listen call short-circuits
+        // before the browser actually fires onstart.
+        speakingRef.current = true;
+        setSpeaking(true);
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(utterance);
       } catch (exc) {
+        speakingRef.current = false;
         setError(exc instanceof Error ? exc.message : 'TTS failed');
         setSpeaking(false);
       }
@@ -334,6 +427,7 @@ export function useVoice(ttsEnabled: boolean): VoiceController {
     ttsSupported: ttsSupportedRef.current,
     listening,
     speaking,
+    partial,
     error,
     listenOnce,
     listenContinuous,
