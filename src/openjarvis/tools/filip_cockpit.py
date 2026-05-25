@@ -342,8 +342,17 @@ def route_text(text: str) -> RouteDecision:
         or "new project called" in lowered
         or "new project named" in lowered
     ):
+        # If the user only said "make me a project" with no name, return a
+        # `clarify` decision so the cockpit frontend speaks the question and
+        # listens for the missing name rather than failing silently. The
+        # scaffold path still owns the actual work once a name is supplied.
+        name_hint = _extract_project_name(text)
+        if name_hint:
+            return RouteDecision(
+                "make_project", "scaffold a new ~/Projects/<name>", "scaffold"
+            )
         return RouteDecision(
-            "make_project", "scaffold a new ~/Projects/<name>", "scaffold"
+            "make_project", "ask Filip for the project name", "clarify"
         )
     # Browser automation — explicit asks routed to Playwright bridge.
     # Examples: "log in to <site>", "open youtube and search for ...",
@@ -364,6 +373,16 @@ def route_text(text: str) -> RouteDecision:
         return RouteDecision(
             "playwright", "browser automation requested", "navigate"
         )
+    # "play <song>" — real playback via Playwright (search YouTube + click the
+    # top result). Exact launcher aliases ("play music", "play youtube") still
+    # fall through to the launcher branch below, which just opens the home
+    # page in a tab. Anything else is treated as a music query.
+    if lowered.startswith("play "):
+        target = lowered[len("play ") :].strip()
+        if target and target not in LAUNCHER_TARGETS:
+            return RouteDecision(
+                "playwright", "play song via YouTube search", "play"
+            )
     # Launcher intent — "open X" / "launch X" / "play X" maps to xdg-open
     # against a fixed allowlist (see LAUNCHER_TARGETS).
     if (
@@ -881,13 +900,18 @@ def make_project(text: str) -> ToolResult:
     """
     name = _extract_project_name(text)
     if not name:
+        # success=True + a question makes this a clarify response: the cockpit
+        # frontend speaks it and listens for the answer (route_text sets
+        # action="clarify" for the same path). On the typed path the user
+        # just reads the question and re-sends with a name appended.
         return ToolResult(
             "make_project",
             content=(
-                "I need a project name, sir. Try: 'make me a project called "
-                "<name>' (lowercase, hyphens or underscores only)."
+                "What shall I call the project, sir? "
+                "Try: 'make me a project called <name>' "
+                "(lowercase, hyphens or underscores only)."
             ),
-            success=False,
+            success=True,
         )
     _PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
     target = _PROJECTS_ROOT / name

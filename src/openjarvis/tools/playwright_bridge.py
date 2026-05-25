@@ -164,6 +164,14 @@ def playwright_run(text: str, repo: Path | None = None) -> ToolResult:
         query = _extract_youtube_query(text)
         return _drive_youtube_search(query)
 
+    # "play <song>" → YouTube search + click the top result. We treat this as
+    # a music query as long as there's no explicit URL — sites with their own
+    # play verb (Spotify, Apple Music) aren't bridged yet, so YouTube is the
+    # fallback "play any audio" path.
+    if not url and lowered.startswith("play "):
+        query = _extract_youtube_query(text)
+        return _drive_youtube_search(query)
+
     if "screenshot" in lowered and url:
         return _drive_screenshot(url)
 

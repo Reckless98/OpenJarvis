@@ -97,3 +97,23 @@ def test_extract_youtube_query_pulls_after_search_or_play() -> None:
         pb._extract_youtube_query("play me dont tread on me")
         == "me dont tread on me"
     )
+
+
+def test_playwright_run_dispatches_play_to_youtube_search(monkeypatch) -> None:
+    """'play <song>' (no URL) should route to _drive_youtube_search.
+
+    We don't actually launch a browser — we monkeypatch the driver and check
+    the query is what the user said (minus the leading 'play ').
+    """
+    captured: dict[str, str] = {}
+
+    def fake_drive(query: str):
+        captured["query"] = query
+        from openjarvis.core.types import ToolResult
+
+        return ToolResult("playwright_bridge", content="ok", success=True)
+
+    monkeypatch.setattr(pb, "_drive_youtube_search", fake_drive)
+    result = pb.playwright_run("play tread on me by cain")
+    assert result.success is True
+    assert captured["query"] == "tread on me by cain"

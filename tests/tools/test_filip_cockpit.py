@@ -111,9 +111,33 @@ def test_make_project_rejects_bad_names_and_collisions(tmp_path, monkeypatch) ->
     again = filip_cockpit.make_project("make me a project called demo-app")
     assert again.success is False
     assert "already exists" in again.content
-    # Empty-name / no-name input should fail without writing.
+
+
+def test_make_project_clarifies_when_name_missing(tmp_path, monkeypatch) -> None:
+    """Bare 'make me a project' returns success=True with a question.
+
+    The cockpit frontend triggers the speak-and-listen clarify flow only when
+    `action == 'clarify'` AND `success is True` — see FilipCockpitPage. So a
+    no-name request must not fail; it must ask.
+    """
+    fake_projects = tmp_path / "Projects"
+    monkeypatch.setattr(filip_cockpit, "_PROJECTS_ROOT", fake_projects)
     blank = filip_cockpit.make_project("make me a project")
-    assert blank.success is False
+    assert blank.success is True
+    assert "what shall i call" in blank.content.lower()
+    # And the matching route decision is clarify, not scaffold.
+    assert route_text("make me a project").action == "clarify"
+    # A named ask still scaffolds.
+    assert route_text("make me a project called widget").action == "scaffold"
+
+
+def test_route_text_routes_play_song_to_playwright() -> None:
+    """'play <song>' goes to the Playwright bridge so it actually plays."""
+    assert route_text("play tread on me by cain").backend == "playwright"
+    assert route_text("play smells like teen spirit").backend == "playwright"
+    # Exact launcher aliases still launch the home page (no song to play).
+    assert route_text("play music").backend == "launcher"
+    assert route_text("play youtube").backend == "launcher"
 
 
 def test_explicit_backend_addressing_overrides_keyword_collision() -> None:
