@@ -215,6 +215,58 @@ def test_open_terminal_uses_x_terminal_emulator(monkeypatch) -> None:
     assert called["args"] == ["/bin/x-terminal-emulator"]
 
 
+def test_open_terminal_with_at_path_passes_cd_arg(tmp_path, monkeypatch) -> None:
+    """`open terminal at <path>` should spawn the emulator with a cd command."""
+    fake_projects = tmp_path / "Projects"
+    target = fake_projects / "demo"
+    target.mkdir(parents=True)
+    monkeypatch.setattr(filip_cockpit, "_PROJECTS_ROOT", fake_projects)
+
+    called: dict[str, list[str]] = {}
+
+    class FakePopen:
+        def __init__(self, args, **_kwargs):
+            called["args"] = list(args)
+
+    monkeypatch.setattr(
+        filip_cockpit.shutil, "which",
+        lambda name: (
+            "/bin/x-terminal-emulator"
+            if name == "x-terminal-emulator"
+            else ""
+        ),
+    )
+    import subprocess as _sp
+
+    monkeypatch.setattr(_sp, "Popen", FakePopen)
+    result = filip_cockpit.open_terminal(f"open terminal at {target}")
+    assert result.success is True
+    args = called["args"]
+    assert args[0] == "/bin/x-terminal-emulator"
+    assert "-e" in args
+    # The cd command should include the quoted path.
+    joined = " ".join(args)
+    assert f"cd {target}" in joined or f"cd '{target}'" in joined
+    assert result.metadata["cwd"] == str(target)
+
+
+def test_route_text_routes_navigate_and_drive_verbs_to_playwright() -> None:
+    """The new drive verbs should land on the playwright backend."""
+    assert route_text("navigate to https://example.com").backend == "playwright"
+    assert route_text("navigate to example.com").backend == "playwright"
+    assert route_text("go to github.com").backend == "playwright"
+    assert route_text("click Sign in").backend == "playwright"
+    assert route_text("tap on Continue").backend == "playwright"
+    assert route_text("fill email with foo@bar.com").backend == "playwright"
+    assert route_text("screenshot").backend == "playwright"
+    assert route_text("take a screenshot").backend == "playwright"
+    # Action label is set per verb so the cockpit UI can chain them.
+    assert route_text("click Sign in").action == "click"
+    assert route_text("fill email with x").action == "fill"
+    assert route_text("screenshot").action == "screenshot"
+    assert route_text("navigate to example.com").action == "navigate"
+
+
 def test_file_write_creates_file_under_projects(tmp_path, monkeypatch) -> None:
     """file_write_request should accept a path under ~/Projects and write it."""
     fake_projects = tmp_path / "Projects"

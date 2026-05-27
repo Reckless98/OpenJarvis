@@ -942,6 +942,9 @@ async def run_cockpit(req: CockpitRunRequest, request: Request):
         is_dict = isinstance(metadata, dict)
         video_id = metadata.get("video_id", "") if is_dict else ""
         video_title = metadata.get("video_title", "") if is_dict else ""
+        screenshot_path = metadata.get("screenshot_path", "") if is_dict else ""
+        clicked_text = metadata.get("clicked_text", "") if is_dict else ""
+        filled_field = metadata.get("filled_field", "") if is_dict else ""
         return {
             "backend": decision.backend,
             "reason": decision.reason,
@@ -952,6 +955,9 @@ async def run_cockpit(req: CockpitRunRequest, request: Request):
             "available": detect_tools(),
             "video_id": video_id,
             "video_title": video_title,
+            "screenshot_path": screenshot_path,
+            "clicked_text": clicked_text,
+            "filled_field": filled_field,
         }
     except HTTPException:
         raise

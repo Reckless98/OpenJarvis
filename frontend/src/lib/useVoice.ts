@@ -108,9 +108,10 @@ export interface VoiceController {
 }
 
 // GPT-Voice ergonomics: long enough for a full sentence with mid-thought pauses,
-// short enough to feel responsive. 25s hard cap; finalize after 2.5s of silence.
+// short enough to feel responsive. 25s hard cap; finalize after 3.5s of silence
+// (bumped from 2.5s in Phase 5 — Filip was getting cut off mid-thought).
 const STT_TIMEOUT_MS = 25000;
-const STT_SILENCE_MS = 2500;
+const STT_SILENCE_MS = 3500;
 // Grace period after TTS ends before we let the continuous listener re-arm.
 // Prevents the tail of "playing now, sir" from bleeding into the next listen.
 const POST_TTS_GRACE_MS = 300;

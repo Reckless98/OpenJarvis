@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -412,15 +413,37 @@ def route_text(text: str) -> RouteDecision:
         or "login to " in lowered
         or "browse to " in lowered
         or "drive the browser" in lowered
+        or lowered.startswith("navigate to ")
+        or lowered.startswith("go to ")
+        or lowered.startswith("visit ")
+        or lowered.startswith("open url ")
         or lowered.startswith("click ")
+        or lowered.startswith("click on ")
+        or lowered.startswith("tap ")
+        or lowered.startswith("tap on ")
         or lowered.startswith("fill ")
         or lowered.startswith("type into ")
-        or lowered.startswith("screenshot ")
+        or lowered.startswith("screenshot")
+        or lowered.startswith("take a screenshot")
+        or lowered.startswith("capture screen")
+        or lowered.startswith("capture the screen")
         or ("youtube" in lowered and "search" in lowered)
         or ("github" in lowered and (" star " in lowered or " comment " in lowered))
     ):
+        # Pick a more accurate action label so the cockpit UI can show what
+        # actually happened — useful when chaining navigate → click → fill.
+        if lowered.startswith(("click", "tap")):
+            action = "click"
+        elif lowered.startswith("fill ") or lowered.startswith("type into "):
+            action = "fill"
+        elif lowered.startswith("screenshot") or "screenshot" in lowered[:30]:
+            action = "screenshot"
+        elif lowered.startswith(("navigate to ", "go to ", "visit ", "open url ")):
+            action = "navigate"
+        else:
+            action = "navigate"
         return RouteDecision(
-            "playwright", "browser automation requested", "navigate"
+            "playwright", "browser automation requested", action
         )
     # "play <song>" — real playback via Playwright (search YouTube + click the
     # top result). Exact launcher aliases ("play music", "play youtube") still
@@ -706,7 +729,7 @@ def execute_route(
 
         result = opencode_run(text, repo=repo, model=model)
     elif decision.backend == "terminal":
-        result = open_terminal(text)
+        result = open_terminal(text, repo)
     elif decision.backend == "file_write":
         result = file_write_request(text, repo)
     elif decision.backend == "subagent_spawn":
@@ -1075,9 +1098,77 @@ _FILE_WRITE_PATH_RE = re.compile(r"([\/~][\w.\-\/]+)")
 _FILE_WRITE_BODY_MARKERS = (" with ", " containing ", " contents: ", ": ")
 
 
-def open_terminal(text: str) -> ToolResult:
-    """Spawn a new terminal window (x-terminal-emulator) detached from the cockpit."""
-    _ = text
+_TERMINAL_PATH_RE = re.compile(
+    r"(?:open|launch|new)\s+(?:a\s+)?terminal\s+(?:at|in)\s+([\/~][\w.\-\/ ]+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_terminal_path(text: str, repo: Path | None) -> Path | None:
+    """Pull an optional "at <path>" from the command, validate it under ~/Projects.
+
+    Returns the absolute resolved path on success, None when no path was
+    requested or the path is rejected (caller decides whether to surface).
+    """
+    match = _TERMINAL_PATH_RE.search(text)
+    if not match:
+        return None
+    raw = match.group(1).strip().rstrip(".,;:")
+    target = Path(raw).expanduser()
+    if not target.is_absolute():
+        target = (_resolve_repo(str(repo) if repo else None) / target).resolve()
+    else:
+        target = target.resolve()
+    allowed = (
+        _PROJECTS_ROOT.resolve(),
+        _resolve_repo(str(repo) if repo else None).resolve(),
+    )
+    if not any(str(target).startswith(str(root)) for root in allowed):
+        return None
+    if not target.exists() or not target.is_dir():
+        return None
+    return target
+
+
+def _focus_terminal_window() -> str | None:
+    """Best-effort raise of the most recent terminal window.
+
+    Tries wmctrl, then xdotool. Returns a human note when neither tool is
+    installed (so we can append "install wmctrl for auto-focus" to the reply);
+    returns None when focus succeeded or silently failed at the tool level.
+    """
+    wmctrl = shutil.which("wmctrl")
+    if wmctrl:
+        try:
+            _run_command(
+                [wmctrl, "-xa", "terminal"], cwd=Path.home(), timeout=3
+            )
+            return None
+        except (OSError, subprocess.SubprocessError):
+            pass
+    xdotool = shutil.which("xdotool")
+    if xdotool:
+        try:
+            _run_command(
+                [xdotool, "search", "--name", "Terminal", "windowactivate"],
+                cwd=Path.home(),
+                timeout=3,
+            )
+            return None
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if not wmctrl and not xdotool:
+        return " (Install wmctrl or xdotool for auto-focus.)"
+    return None
+
+
+def open_terminal(text: str, repo: Path | None = None) -> ToolResult:
+    """Spawn a new terminal window, optionally cd'd into ~/Projects/<path>.
+
+    Accepts an optional "open terminal at <path>" / "in <path>" suffix; the
+    path must resolve under ``~/Projects/`` or the active repo. After spawn,
+    a best-effort wmctrl/xdotool raise pulls the window over the cockpit tab.
+    """
     binary = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal")
     if not binary:
         return ToolResult(
@@ -1088,11 +1179,18 @@ def open_terminal(text: str) -> ToolResult:
             ),
             success=False,
         )
+    cwd_path = _extract_terminal_path(text, repo)
+    args: list[str] = [binary]
+    if cwd_path is not None:
+        # Both x-terminal-emulator (Debian alternative for gnome-terminal /
+        # konsole / etc.) and gnome-terminal honour `-e bash -c '...'`.
+        # Quote the path so spaces don't fracture the inner command.
+        args += ["-e", "bash", "-c", f"cd {shlex.quote(str(cwd_path))}; exec bash"]
     try:
         import subprocess as _sp
 
-        _sp.Popen(  # noqa: S603 — fixed allowlisted binary
-            [binary],
+        _sp.Popen(  # noqa: S603 — fixed allowlisted binary + sanitised path
+            args,
             stdout=_sp.DEVNULL,
             stderr=_sp.DEVNULL,
             stdin=_sp.DEVNULL,
@@ -1104,10 +1202,16 @@ def open_terminal(text: str) -> ToolResult:
             content=f"Failed to spawn terminal: {exc}",
             success=False,
         )
+    # Give the window manager ~150ms to register the new window before we
+    # ask wmctrl to raise it; without the pause the activate call races.
+    time.sleep(0.15)
+    focus_note = _focus_terminal_window() or ""
+    where = f" in {cwd_path}" if cwd_path is not None else ""
     return ToolResult(
         "open_terminal",
-        content="Terminal opened, sir.",
+        content=f"Terminal opened{where}, sir.{focus_note}",
         success=True,
+        metadata={"cwd": str(cwd_path) if cwd_path else ""},
     )
 
 

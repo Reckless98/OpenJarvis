@@ -44,18 +44,35 @@ pid_alive() {
 }
 
 stop_pid() {
-    local pid_file=$1 label=$2
+    # Kills a tracked PID and every process in its process group.
+    # We launch backend/frontend via `setsid`, which makes the leader PID
+    # equal to its PGID, so `kill -- -PID` reaches the whole tree
+    # (npm + vite, uvicorn + reloader, etc.). If the port stays bound
+    # after the ladder, we fall back to `fuser -k` against it.
+    local pid_file=$1 label=$2 port=${3:-}
     local pid; pid=$(read_pid "$pid_file")
     if pid_alive "$pid"; then
-        kill -TERM "$pid" 2>/dev/null
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
         for _ in 1 2 3 4 5; do
             pid_alive "$pid" || break
             sleep 0.2
         done
-        pid_alive "$pid" && kill -KILL "$pid" 2>/dev/null
+        if pid_alive "$pid"; then
+            kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+        fi
         dim "stopped $label (pid $pid)"
     fi
     rm -f "$pid_file"
+    # Belt-and-braces: a vite/node child may have re-execed out of the PGID;
+    # if the port is still bound, free it directly.
+    if [[ -n "$port" ]] && port_in_use "$port"; then
+        if command -v fuser >/dev/null; then
+            fuser -k -TERM "${port}/tcp" >/dev/null 2>&1 || true
+            sleep 0.3
+            port_in_use "$port" && fuser -k -KILL "${port}/tcp" >/dev/null 2>&1 || true
+            dim "freed port $port via fuser"
+        fi
+    fi
 }
 
 wait_port() {
@@ -74,11 +91,13 @@ start_backend() {
         return 0
     fi
     cyan "starting cockpit backend on :$BACKEND_PORT"
+    # setsid puts the launch in its own session/PGID so stop_pid can
+    # signal the whole tree via `kill -- -PID`.
     ( cd "$REPO" && \
-      nohup uv run --extra server python -m uvicorn \
+      setsid nohup uv run --extra server python -m uvicorn \
             openjarvis.server.cockpit_app:app \
             --host 127.0.0.1 --port "$BACKEND_PORT" \
-            >"$BACKEND_LOG" 2>&1 & echo $! > "$BACKEND_PID"
+            >"$BACKEND_LOG" 2>&1 < /dev/null & echo $! > "$BACKEND_PID"
     )
     wait_port "$BACKEND_PORT" "backend"
 }
@@ -89,9 +108,11 @@ start_frontend() {
         return 0
     fi
     cyan "starting frontend (vite) on :$FRONTEND_PORT"
+    # setsid: npm spawns a vite child; stop_pid signals the whole PGID
+    # so vite dies with its parent instead of orphan-leaking the port.
     ( cd "$REPO/frontend" && \
-      nohup npm run dev -- --port "$FRONTEND_PORT" --strictPort \
-            >"$FRONTEND_LOG" 2>&1 & echo $! > "$FRONTEND_PID"
+      setsid nohup npm run dev -- --port "$FRONTEND_PORT" --strictPort \
+            >"$FRONTEND_LOG" 2>&1 < /dev/null & echo $! > "$FRONTEND_PID"
     )
     wait_port "$FRONTEND_PORT" "frontend"
 }
@@ -119,8 +140,8 @@ cmd_status() {
 }
 
 cmd_stop() {
-    stop_pid "$FRONTEND_PID" "frontend"
-    stop_pid "$BACKEND_PID"  "backend"
+    stop_pid "$FRONTEND_PID" "frontend" "$FRONTEND_PORT"
+    stop_pid "$BACKEND_PID"  "backend"  "$BACKEND_PORT"
     green "cockpit stopped"
 }
 

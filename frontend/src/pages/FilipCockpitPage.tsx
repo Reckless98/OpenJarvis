@@ -48,6 +48,11 @@ const TOOL_LABELS: Record<string, string> = {
   'aria-handoff': '.aria',
 };
 
+// In wake mode "all", a clap arms the phrase listener for this many ms.
+// After it expires, "Jarvis ..." goes unheard until the next clap. This is
+// what makes "all" feel like clap-OR-voice instead of an always-hot mic.
+const PHRASE_ARM_MS = 30_000;
+
 function statusColor(success?: boolean) {
   if (success === undefined) return 'var(--color-text-tertiary)';
   return success ? 'var(--color-success)' : 'var(--color-error)';
@@ -168,6 +173,11 @@ export function FilipCockpitPage() {
   const [modelOverride, setModelOverride] = useState<string>('');
   const [statusLine, setStatusLine] = useState('');
   const stopContinuousRef = useRef<(() => void) | null>(null);
+  // In "all" wake mode the phrase listener is OFF until a clap arms it.
+  // Stays armed for PHRASE_ARM_MS ms (or until a wake phrase fires and
+  // dispatches). 0 means "not armed".
+  const [phraseArmedUntil, setPhraseArmedUntil] = useState(0);
+  const [armCountdown, setArmCountdown] = useState(0);
 
   useEffect(() => {
     fetchCockpitBackends()
@@ -310,9 +320,19 @@ export function FilipCockpitPage() {
     }
   };
 
+  const armPhraseListener = () => {
+    setPhraseArmedUntil(performance.now() + PHRASE_ARM_MS);
+  };
+
   const clap = useClapDetector({
     enabled: prefs.wakeMode === 'clap' || prefs.wakeMode === 'all',
     onClap: () => {
+      // In "all" mode, every clap also opens a 30s window during which the
+      // phrase listener is hot — so Filip can clap once, talk for a bit,
+      // and follow up by just saying "Jarvis …" without re-clapping.
+      if (prefs.wakeMode === 'all') {
+        armPhraseListener();
+      }
       void wakeAndListen();
     },
   });
@@ -320,8 +340,13 @@ export function FilipCockpitPage() {
   // Always-on wake: run a continuous SR loop and submit when any wake phrase
   // is heard. Phrases: "jarvis", "hey jarvis", "wake up", "daddy's home"
   // (and the apostrophe-less "daddy home" — STT often drops the contraction).
+  // In "all" mode the loop only runs while a clap has armed it (phraseArmedUntil
+  // is in the future); "always" mode keeps it on permanently.
   useEffect(() => {
-    const phraseWakeArmed = prefs.wakeMode === 'always' || prefs.wakeMode === 'all';
+    const now = performance.now();
+    const phraseWakeArmed =
+      prefs.wakeMode === 'always'
+      || (prefs.wakeMode === 'all' && phraseArmedUntil > now);
     if (!phraseWakeArmed || !voice.sttSupported) {
       stopContinuousRef.current?.();
       stopContinuousRef.current = null;
@@ -351,6 +376,11 @@ export function FilipCockpitPage() {
         cleaned = cleaned.replace(re, '');
       }
       cleaned = cleaned.trim();
+      // Once a wake phrase fires under "all" mode, disarm — the user must
+      // clap again (or finish a 30s arm window) to reopen the phrase mic.
+      if (prefs.wakeMode === 'all') {
+        setPhraseArmedUntil(0);
+      }
       if (cleaned) {
         setCommand(cleaned);
         void submit(cleaned);
@@ -371,7 +401,28 @@ export function FilipCockpitPage() {
       stopContinuousRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prefs.wakeMode, voice.sttSupported]);
+  }, [prefs.wakeMode, voice.sttSupported, phraseArmedUntil]);
+
+  // Tick the armed-pill countdown once a second while a window is open. Stops
+  // firing as soon as the window closes so we're not spinning a timer at idle.
+  useEffect(() => {
+    if (prefs.wakeMode !== 'all' || phraseArmedUntil === 0) {
+      setArmCountdown(0);
+      return;
+    }
+    const tick = () => {
+      const remaining = phraseArmedUntil - performance.now();
+      if (remaining <= 0) {
+        setArmCountdown(0);
+        setPhraseArmedUntil(0);
+      } else {
+        setArmCountdown(Math.ceil(remaining / 1000));
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => window.clearInterval(id);
+  }, [phraseArmedUntil, prefs.wakeMode]);
 
   const jarvisState: JarvisState = loading
     ? 'thinking'
@@ -435,6 +486,20 @@ export function FilipCockpitPage() {
               <ShieldCheck size={14} style={{ color: 'var(--color-success)' }} />
               {prefs.wakeMode === 'off' ? 'Wake off' : `Wake: ${prefs.wakeMode}`}
             </span>
+            {prefs.wakeMode === 'all' && armCountdown > 0 && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                style={{
+                  background: 'color-mix(in srgb, var(--color-accent) 18%, transparent)',
+                  border: '1px solid var(--color-accent)',
+                  color: 'var(--color-text)',
+                }}
+                title="Phrase listener is armed — say 'Jarvis …' before the timer hits zero"
+              >
+                <Mic size={12} />
+                armed ({armCountdown}s)
+              </span>
+            )}
             <span>{voice.sttSupported ? 'STT ready' : 'STT unsupported'}</span>
             <span>{prefs.ttsEnabled ? 'TTS on' : 'TTS off'}</span>
           </div>
@@ -639,6 +704,13 @@ export function FilipCockpitPage() {
                 </button>
               ))}
             </div>
+            <span className="text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
+              {prefs.wakeMode === 'off' && 'Wake disabled — use Talk or Wake buttons.'}
+              {prefs.wakeMode === 'clap' && 'Two quick claps trigger Jarvis.'}
+              {prefs.wakeMode === 'always' && 'Mic always hot — listening for "Jarvis…".'}
+              {prefs.wakeMode === 'all'
+                && `Clap-clap OR "Jarvis…". A clap arms voice for ${PHRASE_ARM_MS / 1000}s.`}
+            </span>
           </div>
         </section>
 

@@ -136,6 +136,76 @@ def test_resolve_play_falls_back_when_yt_dlp_missing(monkeypatch) -> None:
     assert called["query"] == "some song"
 
 
+def test_parse_drive_intent_navigate_normalizes_scheme() -> None:
+    """`navigate to <host>` without a scheme should get https:// prepended."""
+    intent = pb._parse_drive_intent("navigate to example.com", "")
+    assert intent is not None
+    verb, payload = intent
+    assert verb == "navigate"
+    assert payload["url"] == "https://example.com"
+    # Trailing punctuation from STT shouldn't break it.
+    intent2 = pb._parse_drive_intent("navigate to example.com.", "")
+    assert intent2 is not None
+    assert intent2[1]["url"] == "https://example.com"
+
+
+def test_parse_drive_intent_recognises_click_fill_screenshot() -> None:
+    click = pb._parse_drive_intent("click Sign in", "")
+    assert click == ("click", {"target": "Sign in"})
+
+    tap = pb._parse_drive_intent("tap on Continue", "")
+    assert tap == ("click", {"target": "Continue"})
+
+    fill = pb._parse_drive_intent("fill email with foo@bar.com", "")
+    assert fill == ("fill", {"field": "email", "value": "foo@bar.com"})
+
+    fill_in = pb._parse_drive_intent("fill in name with Filip", "")
+    assert fill_in == ("fill", {"field": "name", "value": "Filip"})
+
+    shot = pb._parse_drive_intent("screenshot", "")
+    assert shot == ("screenshot_session", {})
+
+    shot2 = pb._parse_drive_intent("take a screenshot", "")
+    assert shot2 == ("screenshot_session", {})
+
+    assert pb._parse_drive_intent("hello world", "") is None
+
+
+def test_drive_click_refuses_credential_field(monkeypatch) -> None:
+    """`click password` should be refused without touching Playwright."""
+    called: list[bool] = []
+
+    def fake_ensure(*, headless: bool = False):
+        called.append(True)
+        raise AssertionError("should not be reached")
+
+    monkeypatch.setattr(pb, "_ensure_persistent_page", fake_ensure)
+    result = pb._drive_click("password")
+    assert result.success is False
+    assert "credential" in result.content.lower()
+    assert called == []
+
+
+def test_drive_screenshot_session_writes_metadata(monkeypatch, tmp_path) -> None:
+    """`_drive_screenshot_session` returns the resolved path in metadata."""
+
+    class FakePage:
+        url = "https://example.com/"
+
+        def screenshot(self, *, path: str, full_page: bool) -> None:
+            _ = full_page
+            Path(path).write_bytes(b"PNGFAKE")
+
+    monkeypatch.setattr(pb, "SCREENSHOT_DIR", tmp_path)
+    monkeypatch.setattr(pb, "_ensure_persistent_page", lambda **_: FakePage())
+    result = pb._drive_screenshot_session()
+    assert result.success is True
+    out = result.metadata.get("screenshot_path", "")
+    assert out
+    assert Path(out).exists()
+    assert Path(out).read_bytes() == b"PNGFAKE"
+
+
 def test_resolve_play_returns_video_id_metadata(monkeypatch) -> None:
     """When yt-dlp returns a hit, metadata carries video_id + title."""
     import subprocess as sp_mod

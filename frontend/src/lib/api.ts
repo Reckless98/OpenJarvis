@@ -271,6 +271,11 @@ export interface CockpitRunResponse {
   // the cockpit can hand it to the in-page IFrame player.
   video_id?: string;
   video_title?: string;
+  // Phase 5: playwright drive-verb metadata (click / fill / screenshot)
+  // surfaced so the cockpit UI can preview the artifact or echo the action.
+  screenshot_path?: string;
+  clicked_text?: string;
+  filled_field?: string;
 }
 
 export async function runCockpit(body: CockpitRunRequest): Promise<CockpitRunResponse> {

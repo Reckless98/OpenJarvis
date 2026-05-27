@@ -8,6 +8,9 @@ interface YTPlayer {
   stopVideo: () => void;
   setVolume: (volume: number) => void;
   getVolume: () => number;
+  mute: () => void;
+  unMute: () => void;
+  isMuted: () => boolean;
   getVideoData?: () => { title?: string; video_id?: string };
 }
 
@@ -106,6 +109,10 @@ export function useMusicPlayer(): MusicPlayerController {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayer | null>(null);
   const pendingPlayRef = useRef<{ id: string; title?: string } | null>(null);
+  // Set true at the start of each play() call; cleared the first time we see
+  // a PLAYING transition. That's our cue to unMute() — we autoplay muted
+  // because Chrome blocks unmuted autoplay without strong user activation.
+  const needsUnmuteRef = useRef(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentId, setCurrentId] = useState('');
   const [currentTitle, setCurrentTitle] = useState('');
@@ -132,6 +139,10 @@ export function useMusicPlayer(): MusicPlayerController {
         videoId,
         playerVars: {
           autoplay: 1,
+          // Start muted so Chrome's autoplay policy allows playback to begin
+          // without explicit user activation. We unMute() in onStateChange
+          // the first time PLAYING fires after a play() call.
+          mute: 1,
           controls: 0,
           disablekb: 1,
           fs: 0,
@@ -154,6 +165,15 @@ export function useMusicPlayer(): MusicPlayerController {
             const states = window.YT.PlayerState;
             if (data === states.PLAYING) {
               setIsPlaying(true);
+              if (needsUnmuteRef.current) {
+                needsUnmuteRef.current = false;
+                try {
+                  target.unMute();
+                  target.setVolume(FULL_LEVEL);
+                } catch {
+                  /* ignore — autoplay policy may keep it muted */
+                }
+              }
               try {
                 const info = target.getVideoData?.();
                 if (info?.title) setCurrentTitle(info.title);
@@ -182,10 +202,19 @@ export function useMusicPlayer(): MusicPlayerController {
       pendingPlayRef.current = { id: videoId, title };
       setCurrentId(videoId);
       if (title) setCurrentTitle(title);
+      // Arm the unmute-on-first-PLAYING handler for this call.
+      needsUnmuteRef.current = true;
       try {
         const player = await ensurePlayer(videoId);
         // If the API was already ready, switch tracks instead of re-creating.
+        // Re-mute around the swap so the next PLAYING gets the same
+        // muted-autoplay → unmute treatment as a cold start.
         if (playerRef.current && currentId && currentId !== videoId) {
+          try {
+            player.mute();
+          } catch {
+            /* ignore */
+          }
           player.loadVideoById(videoId);
         }
         player.setVolume(FULL_LEVEL);
